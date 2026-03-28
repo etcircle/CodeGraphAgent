@@ -1,3 +1,6 @@
+import json
+import os
+from pathlib import Path as _Path
 from typing import Any, Dict
 from ...utils.debug_log import debug_log, error_logger
 
@@ -80,3 +83,39 @@ def watch_directory(code_watcher, list_repositories_func, add_code_func, **args)
     except Exception as e:
         error_logger(f"Failed to start watching directory {path}: {e}")
         return {"error": f"Failed to start watching directory: {str(e)}"}
+
+
+def get_watcher_health(code_watcher, db_manager, **args) -> Dict[str, Any]:
+    """Returns health status for all active watchers + health files from CLI watchers."""
+    health = {
+        "mcp_watchers": [],
+        "cli_watchers": [],
+        "neo4j_connected": db_manager.is_connected(),
+    }
+
+    # 1. In-process MCP watchers (via handler access)
+    for path_str, handler in code_watcher.handlers.items():
+        health["mcp_watchers"].append({
+            "path": path_str,
+            "status": handler._compute_status(),
+            "cached_files": len(handler.all_file_data),
+            "last_batch_at": handler._last_batch_time,
+            "last_batch_files": handler._last_batch_count,
+            "total_batches": handler._batch_count,
+            "total_errors": handler._error_count,
+            "failed_paths_count": len(handler._failed_paths),
+        })
+
+    # 2. Health files from CLI watchers (if any)
+    health_dir = _Path(os.getenv('CGC_HEALTH_DIR', '/tmp/cgc-watch'))
+    if health_dir.exists():
+        for hf in health_dir.glob("*-health.json"):
+            try:
+                data = json.loads(hf.read_text())
+                # Skip if this is an MCP-managed watcher (already reported above)
+                if data.get("watched_path") not in code_watcher.watched_paths:
+                    health["cli_watchers"].append(data)
+            except Exception:
+                continue
+
+    return {"success": True, "health": health}

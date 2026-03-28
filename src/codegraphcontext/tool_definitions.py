@@ -193,5 +193,13 @@ TOOLS = {
                 "repo_path": {"type": "string", "description": "Optional: Path to a specific repository. If not provided, returns overall database statistics."}
             }
         }
-    }
+    },
+    "get_watcher_health": {
+        "name": "get_watcher_health",
+        "description": "Returns health status for all active file watchers, including last batch time, error counts, cached files, and Neo4j connectivity. Use this to check if the code graph is stale.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
 }

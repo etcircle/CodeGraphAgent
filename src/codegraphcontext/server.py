@@ -173,6 +173,9 @@ class MCPServer:
     def get_repository_stats_tool(self, **args) -> Dict[str, Any]:
         return management_handlers.get_repository_stats(self.code_finder, **args)
 
+    def get_watcher_health_tool(self, **args) -> Dict[str, Any]:
+        return watcher_handlers.get_watcher_health(self.code_watcher, self.db_manager, **args)
+
 
     async def handle_tool_call(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -197,7 +200,8 @@ class MCPServer:
             "unwatch_directory": self.unwatch_directory_tool,
             "load_bundle": self.load_bundle_tool,
             "search_registry_bundles": self.search_registry_bundles_tool,
-            "get_repository_stats": self.get_repository_stats_tool
+            "get_repository_stats": self.get_repository_stats_tool,
+            "get_watcher_health": self.get_watcher_health_tool,
         }
         handler = tool_map.get(tool_name)
         if handler:
@@ -214,7 +218,19 @@ class MCPServer:
         # info_logger("MCP Server is running. Waiting for requests...")
         print("MCP Server is running. Waiting for requests...", file=sys.stderr, flush=True)
         self.code_watcher.start()
-        
+
+        # Auto-start watchers from persisted config
+        auto_paths = os.getenv('CGC_AUTO_WATCH_PATHS', '')
+        if auto_paths:
+            for watch_path in auto_paths.split(':'):
+                watch_path = watch_path.strip()
+                if watch_path and Path(watch_path).is_dir():
+                    try:
+                        self.watch_directory_tool(path=watch_path)
+                        info_logger(f"Auto-started watcher for: {watch_path}")
+                    except Exception as e:
+                        error_logger(f"Failed to auto-start watcher for {watch_path}: {e}")
+
         loop = asyncio.get_event_loop()
         while True:
             try:
