@@ -941,6 +941,18 @@ class GraphBuilder:
             info_logger(f"Deleted repository and its contents from graph: {repo_path_str}")
             return True
 
+    def delete_edges_for_file(self, file_path: str):
+        """Delete all CALLS and INHERITS edges originating FROM nodes in this file."""
+        with self.driver.session() as session:
+            session.run("""
+                MATCH (n {path: $path})-[r:CALLS]->()
+                DELETE r
+            """, path=file_path)
+            session.run("""
+                MATCH (n {path: $path})-[r:INHERITS]->()
+                DELETE r
+            """, path=file_path)
+
     def update_file_in_graph(self, path: Path, repo_path: Path, imports_map: dict):
         """Updates a single file's nodes in the graph."""
         file_path_str = str(path.resolve())

@@ -165,6 +165,70 @@ class RepositoryEventHandler(FileSystemEventHandler):
         self.graph_builder._create_all_inheritance_links(all_data, self.imports_map)
         info_logger(f"Initial scan and graph linking complete for: {self.repo_path}")
 
+    def _update_imports_map_incrementally(self, changed_paths: set):
+        """Update imports_map only for changed files, not the entire cache."""
+        # 1. Remove old entries for changed files
+        for path_str in changed_paths:
+            resolved = str(Path(path_str).resolve())
+            for symbol, paths_list in list(self.imports_map.items()):
+                if resolved in paths_list:
+                    paths_list.remove(resolved)
+                if not paths_list:
+                    del self.imports_map[symbol]
+
+        # 2. Re-scan ONLY changed files for new symbols
+        changed_files = [Path(p) for p in changed_paths if p in self.all_file_data]
+        if changed_files:
+            partial_imports = self.graph_builder._pre_scan_for_imports(changed_files)
+            # 3. Merge into existing map
+            for symbol, paths_list in partial_imports.items():
+                if symbol in self.imports_map:
+                    existing = set(self.imports_map[symbol])
+                    existing.update(paths_list)
+                    self.imports_map[symbol] = list(existing)
+                else:
+                    self.imports_map[symbol] = paths_list
+
+    def _incremental_relink(self, changed_paths: set):
+        """Re-link only edges involving changed files + files that import changed symbols."""
+        # 1. Identify symbols defined in changed files
+        changed_symbols = set()
+        for p in changed_paths:
+            data = self.all_file_data.get(p) or self.all_file_data.get(str(Path(p).resolve()))
+            if data:
+                for func in data.get("functions", []):
+                    changed_symbols.add(func["name"])
+                for cls in data.get("classes", []):
+                    changed_symbols.add(cls["name"])
+
+        # 2. Find affected files: changed files + files that import changed symbols
+        affected_paths = set(changed_paths)
+        for path_str, data in self.all_file_data.items():
+            for imp in data.get("imports", []):
+                imp_name = imp.get("alias") or imp["name"].split(".")[-1]
+                if imp_name in changed_symbols or imp.get("module") in changed_symbols:
+                    affected_paths.add(path_str)
+
+        # 3. Delete CALLS and INHERITS edges originating from affected files
+        for path_str in affected_paths:
+            self.graph_builder.delete_edges_for_file(str(Path(path_str).resolve()))
+
+        # 4. Re-create edges only for affected subset
+        affected_data = [
+            self.all_file_data[p]
+            for p in affected_paths
+            if p in self.all_file_data
+        ]
+        if affected_data:
+            self.graph_builder._create_all_function_calls(affected_data, self.imports_map)
+            self.graph_builder._create_all_inheritance_links(affected_data, self.imports_map)
+
+        info_logger(
+            f"Incremental relink: {len(changed_paths)} changed, "
+            f"{len(affected_paths)} affected, "
+            f"{len(changed_symbols)} symbols"
+        )
+
     def _debounce(self, event_path: str):
         """
         Add a changed path to the pending set and (re)start the batch timer.
@@ -239,21 +303,29 @@ class RepositoryEventHandler(FileSystemEventHandler):
             self._failed_paths.discard(p)
             self._failure_counts.pop(p, None)
 
-        # 2-4. Graph update (full rebuild until Phase 2 replaces with incremental)
+        # 2-4. Incremental graph update
         try:
-            known_files = [Path(p) for p in self.all_file_data]
-            self.imports_map = self.graph_builder._pre_scan_for_imports(known_files)
+            # 2. Incremental imports map update
+            self._update_imports_map_incrementally(successfully_processed)
 
+            # 3. Update changed files in graph (node-level)
             for path_str in successfully_processed:
                 self.graph_builder.update_file_in_graph(
                     Path(path_str), self.repo_path, self.imports_map
                 )
 
-            all_data = list(self.all_file_data.values())
-            self.graph_builder._create_all_function_calls(all_data, self.imports_map)
-            self.graph_builder._create_all_inheritance_links(all_data, self.imports_map)
+            # 4. Incremental re-link (edges only for changed + affected)
+            if self._needs_full_relink:
+                # Recovery: do full re-link once, then clear flag
+                all_data = list(self.all_file_data.values())
+                self.graph_builder._create_all_function_calls(all_data, self.imports_map)
+                self.graph_builder._create_all_inheritance_links(all_data, self.imports_map)
+                self._needs_full_relink = False
+                info_logger("Full re-link recovery completed")
+            else:
+                self._incremental_relink(successfully_processed)
         except Exception as e:
-            error_logger(f"Graph re-linking failed: {e}")
+            error_logger(f"Graph update failed: {e}")
             self._needs_full_relink = True
 
         # 5. Update file mtimes for reconciliation
@@ -271,6 +343,13 @@ class RepositoryEventHandler(FileSystemEventHandler):
         self._write_health()
 
         info_logger(f"Batch complete: {len(successfully_processed)} OK, {batch_errors} errors")
+
+        # 7. Adaptive debounce: scale window based on batch size
+        if len(all_paths) > 20:
+            self.debounce_interval = min(self.debounce_interval * 1.5, 30.0)
+            info_logger(f"Large batch — debounce increased to {self.debounce_interval}s")
+        elif len(all_paths) <= 3 and self.debounce_interval > self._default_debounce:
+            self.debounce_interval = max(self.debounce_interval * 0.75, self._default_debounce)
 
     def _write_health(self):
         """Write watcher health to a JSON file for external monitoring."""
