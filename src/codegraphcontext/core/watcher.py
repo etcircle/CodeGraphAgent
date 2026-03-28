@@ -178,10 +178,7 @@ class RepositoryEventHandler(FileSystemEventHandler):
             self._timer.start()
 
     def _process_batch(self):
-        """
-        Process all files that changed during the debounce window.
-        Only re-parses changed files; reuses cached data for everything else.
-        """
+        """Process all files that changed during the debounce window, with error isolation."""
         with self._lock:
             paths = self._pending_paths.copy()
             self._pending_paths.clear()
@@ -190,39 +187,129 @@ class RepositoryEventHandler(FileSystemEventHandler):
         if not paths:
             return
 
-        info_logger(f"Processing batch of {len(paths)} changed file(s)")
-        supported_extensions = self.graph_builder.parsers.keys()
-
-        # 1. Incrementally update only the changed files in our cache.
-        for path_str in paths:
-            modified_path = Path(path_str)
-
-            if (modified_path.exists() and modified_path.is_file()
-                    and modified_path.suffix in supported_extensions):
-                parsed_data = self.graph_builder.parse_file(self.repo_path, modified_path)
-                if "error" not in parsed_data:
-                    self.all_file_data[str(modified_path)] = parsed_data
-                else:
-                    self.all_file_data.pop(str(modified_path), None)
+        # Prepend any previously failed paths (with retry limit)
+        retry_paths = set()
+        for p in list(self._failed_paths):
+            count = self._failure_counts.get(p, 0)
+            if count < self._max_retries:
+                retry_paths.add(p)
             else:
-                # File was deleted or is not a supported type.
-                self.all_file_data.pop(path_str, None)
+                error_logger(f"Dropping {p} after {self._max_retries} consecutive failures")
+                self._failed_paths.discard(p)
+                self._failure_counts.pop(p, None)
 
-        # 2. Rebuild imports map from cached known files (no rglob needed).
-        known_files = [Path(p) for p in self.all_file_data]
-        self.imports_map = self.graph_builder._pre_scan_for_imports(known_files)
+        all_paths = paths | retry_paths
+        info_logger(f"Processing batch of {len(all_paths)} file(s) ({len(retry_paths)} retries)")
 
-        # 3. Update changed files in the graph.
-        for path_str in paths:
-            self.graph_builder.update_file_in_graph(
-                Path(path_str), self.repo_path, self.imports_map
-            )
+        supported_extensions = self.graph_builder.parsers.keys()
+        batch_errors = 0
+        successfully_processed = set()
 
-        # 4. Re-link the graph using cached data (no full re-parse needed).
-        all_data = list(self.all_file_data.values())
-        self.graph_builder._create_all_function_calls(all_data, self.imports_map)
-        self.graph_builder._create_all_inheritance_links(all_data, self.imports_map)
-        info_logger(f"Batch processing complete for {len(paths)} file(s)")
+        # 1. Per-file parse + cache update — each file isolated
+        for path_str in all_paths:
+            try:
+                modified_path = Path(path_str)
+                if (modified_path.exists() and modified_path.is_file()
+                        and modified_path.suffix in supported_extensions):
+                    # File stability check: wait for editor save to finish
+                    if not self._is_file_stable(modified_path):
+                        warning_logger(f"File not stable yet, deferring: {path_str}")
+                        self._failed_paths.add(path_str)
+                        self._failure_counts[path_str] = self._failure_counts.get(path_str, 0) + 1
+                        batch_errors += 1
+                        continue
+
+                    parsed_data = self.graph_builder.parse_file(self.repo_path, modified_path)
+                    if "error" not in parsed_data:
+                        self.all_file_data[str(modified_path)] = parsed_data
+                    else:
+                        self.all_file_data.pop(str(modified_path), None)
+                else:
+                    self.all_file_data.pop(path_str, None)
+                successfully_processed.add(path_str)
+            except Exception as e:
+                error_logger(f"Failed to process {path_str}: {e}")
+                self._failed_paths.add(path_str)
+                self._failure_counts[path_str] = self._failure_counts.get(path_str, 0) + 1
+                batch_errors += 1
+                continue
+
+        # Clear failure state for successfully processed paths
+        for p in successfully_processed:
+            self._failed_paths.discard(p)
+            self._failure_counts.pop(p, None)
+
+        # 2-4. Graph update (full rebuild until Phase 2 replaces with incremental)
+        try:
+            known_files = [Path(p) for p in self.all_file_data]
+            self.imports_map = self.graph_builder._pre_scan_for_imports(known_files)
+
+            for path_str in successfully_processed:
+                self.graph_builder.update_file_in_graph(
+                    Path(path_str), self.repo_path, self.imports_map
+                )
+
+            all_data = list(self.all_file_data.values())
+            self.graph_builder._create_all_function_calls(all_data, self.imports_map)
+            self.graph_builder._create_all_inheritance_links(all_data, self.imports_map)
+        except Exception as e:
+            error_logger(f"Graph re-linking failed: {e}")
+            self._needs_full_relink = True
+
+        # 5. Update file mtimes for reconciliation
+        for p in successfully_processed:
+            try:
+                self._file_mtimes[p] = Path(p).stat().st_mtime
+            except OSError:
+                self._file_mtimes.pop(p, None)
+
+        # 6. Update health + metrics
+        self._last_batch_time = datetime.utcnow().isoformat() + "Z"
+        self._last_batch_count = len(successfully_processed)
+        self._batch_count += 1
+        self._error_count += batch_errors
+        self._write_health()
+
+        info_logger(f"Batch complete: {len(successfully_processed)} OK, {batch_errors} errors")
+
+    def _write_health(self):
+        """Write watcher health to a JSON file for external monitoring."""
+        health_dir = Path(os.getenv('CGC_HEALTH_DIR', '/tmp/cgc-watch'))
+        health_dir.mkdir(parents=True, exist_ok=True)
+
+        health = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "status": self._compute_status(),
+            "watched_path": str(self.repo_path),
+            "cached_files": len(self.all_file_data),
+            "last_batch_at": self._last_batch_time,
+            "last_batch_files": self._last_batch_count,
+            "failed_paths": list(self._failed_paths)[:20],
+            "total_batches": self._batch_count,
+            "total_errors": self._error_count,
+            "needs_full_relink": self._needs_full_relink,
+            "pid": os.getpid(),
+        }
+
+        health_path = health_dir / f"{self.repo_path.name}-health.json"
+        try:
+            health_path.write_text(json.dumps(health, indent=2))
+        except Exception as e:
+            error_logger(f"Failed to write health file: {e}")
+
+    def _compute_status(self) -> str:
+        if self._needs_full_relink or len(self._failed_paths) > 10:
+            return "error"
+        elif len(self._failed_paths) > 0:
+            return "degraded"
+        return "healthy"
+
+    def _schedule_health_heartbeat(self):
+        """Write health every 60s even when idle."""
+        self._write_health()
+        self._health_timer = threading.Timer(60.0, self._schedule_health_heartbeat)
+        self._health_timer.daemon = True
+        self._health_timer.start()
 
     # The following methods are called by the watchdog observer when a file event occurs.
     def on_created(self, event):

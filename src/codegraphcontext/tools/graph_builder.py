@@ -505,13 +505,16 @@ class GraphBuilder:
 
     # Second pass to create relationships that depend on all files being present like call functions and class inheritance
     def _safe_run_create(self, session, query, params) -> bool:
-        """Helper to run a creation query safely, catching exceptions and checking result."""
+        """Helper to run a creation query safely with retry on transient Neo4j errors."""
         try:
-            result = session.run(query, **params)
-            row = result.single()
-            return row is not None and row.get('created', 0) > 0
-        except Exception as e:
-            # Optionally log, but suppress to allow fallback
+            from ..core import get_database_manager
+            db_manager = get_database_manager()
+            def _run():
+                result = session.run(query, **params)
+                row = result.single()
+                return row is not None and row.get('created', 0) > 0
+            return db_manager.execute_with_retry(_run)
+        except Exception:
             return False
 
     def _create_function_calls(self, session, file_data: Dict, imports_map: dict):

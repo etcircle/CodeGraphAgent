@@ -4,9 +4,11 @@ This module provides a thread-safe singleton manager for the Neo4j database conn
 """
 import os
 import re
+import time
 import threading
 from typing import Optional, Tuple
 from neo4j import GraphDatabase, Driver
+from neo4j.exceptions import ServiceUnavailable, SessionExpired
 
 from codegraphcontext.utils.debug_log import debug_log, info_logger, error_logger, warning_logger
 
@@ -147,6 +149,18 @@ class DatabaseManager:
     def get_backend_type(self) -> str:
         """Returns the database backend type."""
         return 'neo4j'
+
+    def execute_with_retry(self, fn, max_retries=3, backoff=2.0):
+        """Execute a Neo4j operation with exponential backoff retry."""
+        for attempt in range(max_retries):
+            try:
+                return fn()
+            except (ServiceUnavailable, SessionExpired, ConnectionError) as e:
+                if attempt == max_retries - 1:
+                    raise
+                wait = backoff * (2 ** attempt)
+                warning_logger(f"Neo4j retry {attempt+1}/{max_retries} in {wait}s: {e}")
+                time.sleep(wait)
 
 
     @staticmethod
