@@ -3,9 +3,18 @@
 This module implements the live file-watching functionality using the `watchdog` library.
 It observes directories for changes and triggers updates to the code graph.
 """
+import hashlib
+import json
+import os
+import signal
+import sys
 import threading
+import time
+from datetime import datetime
 from pathlib import Path
 import typing
+
+import pathspec
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -15,6 +24,13 @@ if typing.TYPE_CHECKING:
 
 from codegraphcontext.utils.debug_log import debug_log, info_logger, error_logger, warning_logger
 
+# Directories always ignored regardless of .gitignore
+IGNORE_DIRS = {
+    '__pycache__', '.git', '.hg', '.svn', 'node_modules', '.tox', '.mypy_cache',
+    '.pytest_cache', '.eggs', '*.egg-info', 'dist', 'build', '.venv', 'venv',
+    'env', '.env', '.idea', '.vscode',
+}
+
 class RepositoryEventHandler(FileSystemEventHandler):
     """
     A dedicated event handler for a single repository being watched.
@@ -23,7 +39,7 @@ class RepositoryEventHandler(FileSystemEventHandler):
     to build a baseline and then uses this cached state to perform efficient
     incremental updates when files are changed, created, or deleted.
     """
-    def __init__(self, graph_builder: "GraphBuilder", repo_path: Path, debounce_interval=2.0, perform_initial_scan: bool = True):
+    def __init__(self, graph_builder: "GraphBuilder", repo_path: Path, debounce_interval=None, perform_initial_scan: bool = True):
         """
         Initializes the event handler.
 
@@ -31,13 +47,17 @@ class RepositoryEventHandler(FileSystemEventHandler):
             graph_builder: An instance of the GraphBuilder to perform graph operations.
             repo_path: The absolute path to the repository directory to watch.
             debounce_interval: The time in seconds to wait for more changes before processing an event.
+                               Defaults to CGC_DEBOUNCE_SECONDS env var, or 5.0.
             perform_initial_scan: Whether to perform an initial scan of the repository.
         """
         super().__init__()
         self.graph_builder = graph_builder
         self.repo_path = repo_path
-        self.debounce_interval = debounce_interval
-        self.timers = {} # Kept for backward compatibility.
+
+        # Configurable debounce from env var (spec default: 5s, was 2s)
+        self._default_debounce = float(os.getenv('CGC_DEBOUNCE_SECONDS', '5'))
+        self.debounce_interval = debounce_interval if debounce_interval is not None else self._default_debounce
+        self.timers = {}  # Kept for backward compatibility.
 
         # Batched debounce: collects changed paths and processes them together.
         self._pending_paths = set()
@@ -49,24 +69,79 @@ class RepositoryEventHandler(FileSystemEventHandler):
         self.all_file_data = {}
         self.imports_map = {}
 
+        # Retry queue (Phase 1)
+        self._failed_paths: set = set()
+        self._failure_counts: dict = {}  # path -> consecutive failure count
+        self._max_retries = int(os.getenv('CGC_MAX_RETRIES', '3'))
+
+        # Health tracking (Phase 1)
+        self._last_batch_time: str = ""
+        self._last_batch_count: int = 0
+        self._batch_count: int = 0
+        self._error_count: int = 0
+        self._needs_full_relink: bool = False
+
+        # File mtimes for reconciliation (Phase 3)
+        self._file_mtimes: dict = {}
+
+        # Load .gitignore patterns for this repo
+        self._gitignore_spec = self._load_gitignore()
+
         # Perform the initial scan and linking when the watcher is created.
         if perform_initial_scan:
             self._initial_scan()
 
+        # Start health heartbeat (writes health even when idle)
+        self._health_timer = None
+        self._schedule_health_heartbeat()
+
+    def _load_gitignore(self) -> pathspec.PathSpec:
+        """Load .gitignore patterns from the repo root, combined with IGNORE_DIRS."""
+        patterns = list(IGNORE_DIRS)
+        gitignore_path = self.repo_path / '.gitignore'
+        if gitignore_path.is_file():
+            try:
+                patterns.extend(gitignore_path.read_text().splitlines())
+            except OSError:
+                pass
+        return pathspec.PathSpec.from_lines("gitignore", patterns)
+
+    def _should_ignore(self, path_str: str) -> bool:
+        """Return True if the path should be ignored (compiled files, .gitignore, IGNORE_DIRS)."""
+        if path_str.endswith('.pyc') or path_str.endswith('.pyo'):
+            return True
+        # Check against IGNORE_DIRS by examining path parts
+        parts = Path(path_str).parts
+        for part in parts:
+            if part in IGNORE_DIRS:
+                return True
+        # Check against .gitignore spec using relative path
+        try:
+            rel = str(Path(path_str).relative_to(self.repo_path))
+            if self._gitignore_spec.match_file(rel):
+                return True
+        except ValueError:
+            pass
+        return False
+
     @staticmethod
-    def _should_ignore(path_str: str) -> bool:
-        """Return True for __pycache__, .pyc, and .pyo paths."""
-        return ('__pycache__' in path_str
-                or path_str.endswith('.pyc')
-                or path_str.endswith('.pyo'))
+    def _is_file_stable(path: Path, wait_ms: int = 300) -> bool:
+        """Check if a file's mtime has stabilised (editors do write-to-temp-then-rename)."""
+        try:
+            mtime1 = path.stat().st_mtime
+            time.sleep(wait_ms / 1000.0)
+            mtime2 = path.stat().st_mtime
+            return mtime1 == mtime2
+        except OSError:
+            return False
 
     def _get_supported_files(self):
-        """Get all supported source files, excluding __pycache__ and compiled files."""
+        """Get all supported source files, excluding ignored paths."""
         supported_extensions = self.graph_builder.parsers.keys()
         return [
             f for f in self.repo_path.rglob("*")
             if f.is_file() and f.suffix in supported_extensions
-            and '__pycache__' not in f.parts
+            and not self._should_ignore(str(f))
         ]
 
     def _initial_scan(self):
