@@ -179,6 +179,42 @@ class MCPServer:
     def get_watcher_health_tool(self, **args) -> Dict[str, Any]:
         return watcher_handlers.get_watcher_health(self.code_watcher, self.db_manager, **args)
 
+    def cgc_guide_tool(self, **args) -> Dict[str, Any]:
+        return {
+            "success": True,
+            "guide": {
+                "primary_tools": {
+                    "get_module_overview": "Understand a module — endpoints, services, models, schemas in one call. Start here when exploring a new module.",
+                    "get_function_context": "Everything about a function — source (from filesystem), callers, callees, class, siblings. One call replaces 4-5 separate queries.",
+                    "grep_code": "Text/regex search across indexed repos. Use for string literals, error messages, API paths, config keys. Better than find_code.",
+                    "find_references": "All usages of a symbol — callers, importers, type annotations, text mentions. Broader than analyze_code_relationships.",
+                    "get_file_content": "Read source code with line numbers. Supports line ranges and around_line centering.",
+                    "diff_since": "What changed recently — git commits + uncommitted changes. Use for handoffs between agents.",
+                    "explain_path": "Shortest call chain from function A to function B. Use for tracing data flow and bugs.",
+                },
+                "secondary_tools": {
+                    "get_file_structure": "Project directory tree with function/class counts.",
+                    "find_most_complex_functions": "Tech debt triage — find refactoring targets.",
+                    "find_dead_code": "Find unused functions across the codebase.",
+                    "execute_cypher_query": "Raw Cypher fallback — use only when primary tools can't answer your question.",
+                },
+                "avoid": {
+                    "find_code": "Use grep_code instead (regex, context lines, file filtering).",
+                    "analyze_code_relationships": "Use find_references or get_function_context instead (more complete, fewer calls).",
+                    "calculate_cyclomatic_complexity": "Already included in get_function_context and get_module_overview output.",
+                },
+                "workflows": {
+                    "explore_new_module": "get_module_overview → get_function_context on key functions",
+                    "understand_function": "get_function_context (one call, not four)",
+                    "find_usages": "find_references (not analyze_code_relationships)",
+                    "search_text": "grep_code (not find_code)",
+                    "read_source": "get_file_content (not external filesystem tools)",
+                    "trace_bug": "explain_path from entry point to suspected cause",
+                    "pick_up_work": "diff_since to see what changed",
+                },
+            },
+        }
+
     # --- New Agent Productivity Tools ---
 
     def grep_code_tool(self, **args) -> Dict[str, Any]:
@@ -238,6 +274,7 @@ class MCPServer:
             "diff_since": self.diff_since_tool,
             "explain_path": self.explain_path_tool,
             "get_file_structure": self.get_file_structure_tool,
+            "cgc_guide": self.cgc_guide_tool,
         }
         handler = tool_map.get(tool_name)
         if handler:

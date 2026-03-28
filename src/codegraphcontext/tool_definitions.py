@@ -323,4 +323,12 @@ TOOLS = {
             "required": ["repo_path"]
         }
     },
+    "cgc_guide": {
+        "name": "cgc_guide",
+        "description": "Returns a quick reference guide for all CGC tools — which tool to use for what question. Call this at the start of a session to understand the available tools, or when unsure which tool to use.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        }
+    },
 }
