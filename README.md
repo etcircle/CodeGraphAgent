@@ -1,4 +1,4 @@
-# CodeGraph Agent
+# CodeGraphAgent
 
 **Turn your codebase into a queryable knowledge graph for AI agents.**
 
@@ -33,8 +33,8 @@ CodeGraph Agent addresses all of these.
 ```bash
 pip install codegraph-agent
 # or from source:
-git clone https://github.com/etcircle/CodeGraphContext.git
-cd CodeGraphContext
+git clone https://github.com/etcircle/CodeGraphAgent.git
+cd CodeGraphAgent
 pip install -e .
 ```
 
@@ -224,8 +224,8 @@ Python · TypeScript · JavaScript · Go · Java · C · C++ · Rust · Ruby · 
 
 ```bash
 # Clone and install in editable mode
-git clone https://github.com/etcircle/CodeGraphContext.git
-cd CodeGraphContext
+git clone https://github.com/etcircle/CodeGraphAgent.git
+cd CodeGraphAgent
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
