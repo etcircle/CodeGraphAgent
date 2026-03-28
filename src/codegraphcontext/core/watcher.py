@@ -10,7 +10,7 @@ import signal
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import typing
 
@@ -441,7 +441,7 @@ class RepositoryEventHandler(FileSystemEventHandler):
                 self._file_mtimes.pop(p, None)
 
         # 6. Update health + metrics
-        self._last_batch_time = datetime.utcnow().isoformat() + "Z"
+        self._last_batch_time = datetime.now(tz=timezone.utc).isoformat()
         self._last_batch_count = len(successfully_processed)
         self._batch_count += 1
         self._error_count += batch_errors
@@ -462,7 +462,7 @@ class RepositoryEventHandler(FileSystemEventHandler):
         health_dir.mkdir(parents=True, exist_ok=True)
 
         health = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
             "status": self._compute_status(),
             "watched_path": str(self.repo_path),
             "cached_files": len(self.all_file_data),
