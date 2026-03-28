@@ -31,6 +31,41 @@ IGNORE_DIRS = {
     'env', '.env', '.idea', '.vscode',
 }
 
+class Neo4jCircuitBreaker:
+    """Prevents hammering a dead Neo4j with requests."""
+
+    def __init__(self):
+        self.failure_threshold = int(os.getenv('CGC_CIRCUIT_BREAKER_THRESHOLD', '5'))
+        self.reset_timeout = int(os.getenv('CGC_CIRCUIT_BREAKER_RESET', '60'))
+        self.failures = 0
+        self.last_failure = 0.0
+        self.state = "closed"  # closed | open | half-open
+
+    def can_execute(self) -> bool:
+        if self.state == "closed":
+            return True
+        if self.state == "open":
+            if time.time() - self.last_failure > self.reset_timeout:
+                self.state = "half-open"
+                info_logger("Circuit breaker half-open — allowing test request")
+                return True
+            return False
+        return True  # half-open: allow one attempt
+
+    def record_success(self):
+        if self.state == "half-open":
+            info_logger("Circuit breaker closed — Neo4j recovered")
+        self.failures = 0
+        self.state = "closed"
+
+    def record_failure(self):
+        self.failures += 1
+        self.last_failure = time.time()
+        if self.failures >= self.failure_threshold:
+            self.state = "open"
+            warning_logger(f"Circuit breaker OPEN — Neo4j failures: {self.failures}")
+
+
 class RepositoryEventHandler(FileSystemEventHandler):
     """
     A dedicated event handler for a single repository being watched.
@@ -69,6 +104,9 @@ class RepositoryEventHandler(FileSystemEventHandler):
         self.all_file_data = {}
         self.imports_map = {}
 
+        # Circuit breaker for Neo4j (Phase 3)
+        self._circuit_breaker = Neo4jCircuitBreaker()
+
         # Retry queue (Phase 1)
         self._failed_paths: set = set()
         self._failure_counts: dict = {}  # path -> consecutive failure count
@@ -94,6 +132,10 @@ class RepositoryEventHandler(FileSystemEventHandler):
         # Start health heartbeat (writes health even when idle)
         self._health_timer = None
         self._schedule_health_heartbeat()
+
+        # Start periodic reconciliation (catches missed FSEvents)
+        self._reconcile_timer = None
+        self._start_reconciliation_timer()
 
     def _load_gitignore(self) -> pathspec.PathSpec:
         """Load .gitignore patterns from the repo root, combined with IGNORE_DIRS."""
@@ -145,24 +187,77 @@ class RepositoryEventHandler(FileSystemEventHandler):
         ]
 
     def _initial_scan(self):
-        """Scans the entire repository, parses all files, and builds the initial graph."""
-        info_logger(f"Performing initial scan for watcher: {self.repo_path}")
-        all_files = self._get_supported_files()
+        """Scans the repository, using file state cache for incremental startup."""
+        cached_state = self._load_file_state()
 
-        # 1. Pre-scan all files to get a global map of where every symbol is defined.
+        if cached_state:
+            info_logger(f"Found cached state for {len(cached_state)} files — doing incremental startup")
+            all_files = self._get_supported_files()
+            current_paths = {self._normalise_path(str(f)) for f in all_files}
+            cached_paths = set(cached_state.keys())
+
+            # Identify what changed since last run
+            new_files = current_paths - cached_paths
+            deleted_files = cached_paths - current_paths
+            modified_files = set()
+            unchanged_files = set()
+
+            for f_str in current_paths & cached_paths:
+                try:
+                    stat = Path(f_str).stat()
+                    cached = cached_state[f_str]
+                    if stat.st_mtime != cached["mtime"] or stat.st_size != cached["size"]:
+                        modified_files.add(f_str)
+                    else:
+                        unchanged_files.add(f_str)
+                except OSError:
+                    modified_files.add(f_str)
+
+            files_to_parse = new_files | modified_files
+            info_logger(f"Incremental startup: {len(files_to_parse)} to parse, "
+                       f"{len(unchanged_files)} unchanged, {len(deleted_files)} deleted")
+
+            if len(files_to_parse) < len(current_paths) * 0.5:
+                # Less than 50% changed — incremental is worth it
+                for f_str in files_to_parse:
+                    parsed = self.graph_builder.parse_file(self.repo_path, Path(f_str))
+                    if "error" not in parsed:
+                        self.all_file_data[f_str] = parsed
+
+                # Also parse unchanged files for the in-memory cache (needed for re-linking)
+                for f_str in unchanged_files:
+                    parsed = self.graph_builder.parse_file(self.repo_path, Path(f_str))
+                    if "error" not in parsed:
+                        self.all_file_data[f_str] = parsed
+
+                self.imports_map = self.graph_builder._pre_scan_for_imports(
+                    [Path(p) for p in self.all_file_data]
+                )
+                all_data = list(self.all_file_data.values())
+                self.graph_builder._create_all_function_calls(all_data, self.imports_map)
+                self.graph_builder._create_all_inheritance_links(all_data, self.imports_map)
+
+                self._save_file_state()
+                info_logger(f"Incremental startup complete for: {self.repo_path}")
+                return
+
+        # Fallback: full scan (same as original)
+        info_logger(f"Performing full initial scan for watcher: {self.repo_path}")
+        all_files = self._get_supported_files()
         self.imports_map = self.graph_builder._pre_scan_for_imports(all_files)
 
-        # 2. Parse all files in detail and cache the parsed data (keyed by path).
         self.all_file_data = {}
         for f in all_files:
+            f_str = self._normalise_path(str(f))
             parsed_data = self.graph_builder.parse_file(self.repo_path, f)
             if "error" not in parsed_data:
-                self.all_file_data[str(f)] = parsed_data
+                self.all_file_data[f_str] = parsed_data
 
-        # 3. After all files are parsed, create the relationships between them.
         all_data = list(self.all_file_data.values())
         self.graph_builder._create_all_function_calls(all_data, self.imports_map)
         self.graph_builder._create_all_inheritance_links(all_data, self.imports_map)
+
+        self._save_file_state()
         info_logger(f"Initial scan and graph linking complete for: {self.repo_path}")
 
     def _update_imports_map_incrementally(self, changed_paths: set):
@@ -234,8 +329,9 @@ class RepositoryEventHandler(FileSystemEventHandler):
         Add a changed path to the pending set and (re)start the batch timer.
         Multiple file changes within the debounce window are processed together.
         """
+        normalised = self._normalise_path(event_path)
         with self._lock:
-            self._pending_paths.add(event_path)
+            self._pending_paths.add(normalised)
             if self._timer is not None:
                 self._timer.cancel()
             self._timer = threading.Timer(self.debounce_interval, self._process_batch)
@@ -249,6 +345,13 @@ class RepositoryEventHandler(FileSystemEventHandler):
             self._timer = None
 
         if not paths:
+            return
+
+        # Circuit breaker check
+        if not self._circuit_breaker.can_execute():
+            warning_logger("Circuit breaker open — skipping batch, queuing for retry")
+            with self._lock:
+                self._pending_paths.update(paths)
             return
 
         # Prepend any previously failed paths (with retry limit)
@@ -324,9 +427,11 @@ class RepositoryEventHandler(FileSystemEventHandler):
                 info_logger("Full re-link recovery completed")
             else:
                 self._incremental_relink(successfully_processed)
+            self._circuit_breaker.record_success()
         except Exception as e:
             error_logger(f"Graph update failed: {e}")
             self._needs_full_relink = True
+            self._circuit_breaker.record_failure()
 
         # 5. Update file mtimes for reconciliation
         for p in successfully_processed:
@@ -390,28 +495,118 @@ class RepositoryEventHandler(FileSystemEventHandler):
         self._health_timer.daemon = True
         self._health_timer.start()
 
+    # --- Path normalisation (Phase 3.5) ---
+
+    @staticmethod
+    def _normalise_path(path_str: str) -> str:
+        """Normalise all paths to resolved absolute form."""
+        return str(Path(path_str).resolve())
+
+    # --- Periodic reconciliation (Phase 3.2) ---
+
+    def _start_reconciliation_timer(self):
+        """Periodically check for missed file events (FSEvents overflow)."""
+        interval = int(os.getenv('CGC_RECONCILE_INTERVAL', '300'))
+        self._reconcile_timer = threading.Timer(interval, self._reconcile_and_reschedule)
+        self._reconcile_timer.daemon = True
+        self._reconcile_timer.start()
+
+    def _reconcile_and_reschedule(self):
+        """Catch events missed by watchdog."""
+        try:
+            current_files = {str(f) for f in self._get_supported_files()}
+            cached_files = set(self.all_file_data.keys())
+
+            new_files = current_files - cached_files
+            deleted_files = cached_files - current_files
+
+            # Check mtime for modified files
+            modified_files = set()
+            for f in current_files & cached_files:
+                try:
+                    mtime = Path(f).stat().st_mtime
+                    if mtime > self._file_mtimes.get(f, 0):
+                        modified_files.add(f)
+                except OSError:
+                    continue
+
+            stale = new_files | deleted_files | modified_files
+            if stale:
+                info_logger(f"Reconciliation found {len(stale)} stale files "
+                           f"({len(new_files)} new, {len(deleted_files)} deleted, "
+                           f"{len(modified_files)} modified)")
+                for p in stale:
+                    self._debounce(p)
+        except Exception as e:
+            error_logger(f"Reconciliation failed: {e}")
+        finally:
+            self._start_reconciliation_timer()
+
+    # --- Startup file cache (Phase 3.3) ---
+
+    def _get_cache_dir(self) -> Path:
+        base = Path(os.getenv('CGC_FILE_CACHE_DIR',
+                              os.path.expanduser('~/.codegraphcontext/cache')))
+        repo_hash = hashlib.md5(str(self.repo_path).encode()).hexdigest()[:12]
+        cache_dir = base / repo_hash
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir
+
+    def _save_file_state(self):
+        """Persist file mtimes + sizes for fast restart diff."""
+        state = {}
+        for path_str in self.all_file_data:
+            try:
+                p = Path(path_str)
+                stat = p.stat()
+                state[path_str] = {"mtime": stat.st_mtime, "size": stat.st_size}
+            except OSError:
+                continue
+
+        cache_path = self._get_cache_dir() / "file_state.json"
+        cache_path.write_text(json.dumps(state))
+        info_logger(f"Saved file state cache: {len(state)} files")
+
+    def _load_file_state(self) -> dict:
+        """Load persisted file state for diffing against current filesystem."""
+        cache_path = self._get_cache_dir() / "file_state.json"
+        if cache_path.exists():
+            try:
+                return json.loads(cache_path.read_text())
+            except Exception:
+                return {}
+        return {}
+
     # The following methods are called by the watchdog observer when a file event occurs.
+    # All paths are normalised to resolved absolute form (Phase 3.5 / 5.1).
     def on_created(self, event):
         if not event.is_directory and not self._should_ignore(event.src_path):
-            if Path(event.src_path).suffix in self.graph_builder.parsers:
-                self._debounce(event.src_path)
+            path = self._normalise_path(event.src_path)
+            if Path(path).suffix in self.graph_builder.parsers:
+                self._debounce(path)
 
     def on_modified(self, event):
         if not event.is_directory and not self._should_ignore(event.src_path):
-            if Path(event.src_path).suffix in self.graph_builder.parsers:
-                self._debounce(event.src_path)
+            path = self._normalise_path(event.src_path)
+            if Path(path).suffix in self.graph_builder.parsers:
+                self._debounce(path)
 
     def on_deleted(self, event):
         if not event.is_directory and not self._should_ignore(event.src_path):
-            if Path(event.src_path).suffix in self.graph_builder.parsers:
-                self._debounce(event.src_path)
+            path = self._normalise_path(event.src_path)
+            if Path(path).suffix in self.graph_builder.parsers:
+                self._debounce(path)
 
     def on_moved(self, event):
         if not event.is_directory:
-            if not self._should_ignore(event.src_path) and Path(event.src_path).suffix in self.graph_builder.parsers:
-                self._debounce(event.src_path)
-            if not self._should_ignore(event.dest_path) and Path(event.dest_path).suffix in self.graph_builder.parsers:
-                self._debounce(event.dest_path)
+            if not self._should_ignore(event.src_path):
+                path = self._normalise_path(event.src_path)
+                if Path(path).suffix in self.graph_builder.parsers:
+                    self._debounce(path)
+            if not self._should_ignore(event.dest_path):
+                dest = self._normalise_path(event.dest_path)
+                if Path(dest).suffix in self.graph_builder.parsers:
+                    self._debounce(dest)
 
 
 class CodeWatcher:
@@ -419,11 +614,12 @@ class CodeWatcher:
     Manages the file system observer thread. It can watch multiple directories,
     assigning a separate `RepositoryEventHandler` to each one.
     """
-    def __init__(self, graph_builder: "GraphBuilder", job_manager= "JobManager"):
+    def __init__(self, graph_builder: "GraphBuilder", job_manager="JobManager"):
         self.graph_builder = graph_builder
         self.observer = Observer()
-        self.watched_paths = set() # Keep track of paths already being watched.
-        self.watches = {} # Store watch objects to allow unscheduling
+        self.watched_paths = set()  # Keep track of paths already being watched.
+        self.watches = {}  # Store watch objects to allow unscheduling
+        self.handlers: dict[str, RepositoryEventHandler] = {}  # Phase 4.2: handler access
 
     def watch_directory(self, path: str, perform_initial_scan: bool = True):
         """Schedules a directory to be watched for changes."""
@@ -433,16 +629,18 @@ class CodeWatcher:
         if path_str in self.watched_paths:
             info_logger(f"Path already being watched: {path_str}")
             return {"message": f"Path already being watched: {path_str}"}
-        
+
         # Create a new, dedicated event handler for this specific repository path.
         event_handler = RepositoryEventHandler(self.graph_builder, path_obj, perform_initial_scan=perform_initial_scan)
-        
+
         watch = self.observer.schedule(event_handler, path_str, recursive=True)
         self.watches[path_str] = watch
+        self.handlers[path_str] = event_handler
         self.watched_paths.add(path_str)
         info_logger(f"Started watching for code changes in: {path_str}")
-        
+
         return {"message": f"Started watching {path_str}."}
+
     def unwatch_directory(self, path: str):
         """Stops watching a directory for changes."""
         path_obj = Path(path).resolve()
@@ -452,10 +650,17 @@ class CodeWatcher:
             warning_logger(f"Attempted to unwatch a path that is not being watched: {path_str}")
             return {"error": f"Path not currently being watched: {path_str}"}
 
+        # Save state before unwatching
+        handler = self.handlers.get(path_str)
+        if handler:
+            handler._save_file_state()
+            handler._write_health()
+
         watch = self.watches.pop(path_str, None)
         if watch:
             self.observer.unschedule(watch)
-        
+
+        self.handlers.pop(path_str, None)
         self.watched_paths.discard(path_str)
         info_logger(f"Stopped watching for code changes in: {path_str}")
         return {"message": f"Stopped watching {path_str}."}
@@ -465,10 +670,24 @@ class CodeWatcher:
         return list(self.watched_paths)
 
     def start(self):
-        """Starts the observer thread."""
+        """Starts the observer thread and registers signal handlers."""
         if not self.observer.is_alive():
             self.observer.start()
             info_logger("Code watcher observer thread started.")
+
+        # Register graceful shutdown handlers (only from main thread)
+        if threading.current_thread() is threading.main_thread():
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                signal.signal(sig, self._handle_shutdown_signal)
+
+    def _handle_shutdown_signal(self, signum, frame):
+        """Gracefully shut down on SIGTERM/SIGINT — persist state before exit."""
+        info_logger(f"Received signal {signum}, shutting down gracefully")
+        for path_str, handler in self.handlers.items():
+            handler._save_file_state()
+            handler._write_health()
+        self.stop()
+        sys.exit(0)
 
     def stop(self):
         """Stops the observer thread gracefully."""
