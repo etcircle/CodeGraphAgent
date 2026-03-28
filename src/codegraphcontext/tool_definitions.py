@@ -202,4 +202,125 @@ TOOLS = {
             "properties": {},
         },
     },
+    "grep_code": {
+        "name": "grep_code",
+        "description": "Search for a text pattern or regex across indexed repositories. Returns matching lines with file paths, line numbers, and context. Use this for: string literals, error messages, API paths, config keys, TODO/FIXME comments. Use find_code for symbol name lookups. Use find_references for comprehensive 'who uses this symbol' queries.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Text or regex pattern to search for."},
+                "is_regex": {"type": "boolean", "default": False},
+                "file_pattern": {"type": "string", "description": "Glob filter (e.g. '*.py', 'test_*.py')."},
+                "exclude_pattern": {"type": "string", "description": "Glob to exclude (e.g. 'test_*', '*.migration.py')."},
+                "repo_path": {"type": "string", "description": "Optional: restrict to one repository."},
+                "context_lines": {"type": "integer", "default": 2},
+                "max_results": {"type": "integer", "description": "Max total matches (not per-file). Default 50.", "default": 50},
+                "case_sensitive": {"type": "boolean", "default": True}
+            },
+            "required": ["pattern"]
+        }
+    },
+    "get_file_content": {
+        "name": "get_file_content",
+        "description": "Read source code from a file in an indexed repository. Returns content with line numbers. Security-scoped: only reads files within indexed repos. Use after find_code or grep_code to read actual source.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Absolute path to the file."},
+                "start_line": {"type": "integer", "description": "First line (1-indexed). Omit for file start."},
+                "end_line": {"type": "integer", "description": "Last line (1-indexed). Omit for file end."},
+                "around_line": {"type": "integer", "description": "Center the view on this line number. Combine with context_lines."},
+                "context_lines": {"type": "integer", "description": "Lines before/after around_line. Default 20.", "default": 20},
+                "max_lines": {"type": "integer", "default": 500}
+            },
+            "required": ["path"]
+        }
+    },
+    "get_function_context": {
+        "name": "get_function_context",
+        "description": "Returns comprehensive context for a function: source code (from filesystem), class membership, callers, callees, imports, and sibling methods. Use this when you need to understand a function before modifying it. Use find_code for simple name lookups. Use grep_code for text/pattern searches.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "function_name": {"type": "string", "description": "Name of the function to analyse."},
+                "file_path": {"type": "string", "description": "Optional: file path to disambiguate same-named functions."},
+                "repo_path": {"type": "string", "description": "Optional: restrict to a specific repository."},
+                "include_source": {"type": "boolean", "description": "Include full source code (always from filesystem). Default true.", "default": True},
+                "caller_depth": {"type": "integer", "description": "Levels of callers. Default 1.", "default": 1},
+                "callee_depth": {"type": "integer", "description": "Levels of callees. Default 1.", "default": 1},
+                "include_sibling_methods": {"type": "boolean", "description": "If method, include other methods on the same class (names + signatures only). Default true.", "default": True}
+            },
+            "required": ["function_name"]
+        }
+    },
+    "get_module_overview": {
+        "name": "get_module_overview",
+        "description": "Returns a structured summary of a code module: endpoints (with HTTP methods), service classes and methods, models, schemas, and key functions. Use this to understand what a module does before diving into files. Works best with Python backend modules but supports TypeScript too.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "module_path": {"type": "string", "description": "Path to the module directory (absolute or relative to repo root)."},
+                "repo_path": {"type": "string", "description": "Optional: repository root for resolving relative paths."}
+            },
+            "required": ["module_path"]
+        }
+    },
+    "find_references": {
+        "name": "find_references",
+        "description": "Find all references to a symbol: callers, importers, inheritors, type annotations, and text mentions. Broader than find_callers. Use this for comprehensive 'who uses this?' queries. Use find_callers for just the call graph.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Symbol name (function, class, variable, type)."},
+                "repo_path": {"type": "string", "description": "Optional: restrict to one repository."},
+                "include_definitions": {"type": "boolean", "default": False}
+            },
+            "required": ["symbol"]
+        }
+    },
+    "diff_since": {
+        "name": "diff_since",
+        "description": "Show files changed within a time window or since a commit. Uses git history. Useful for picking up another agent's work, reviewing recent changes, or morning standup context.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string", "description": "Repository path."},
+                "since": {"type": "string", "description": "Time ref: '1h', '4h', '1d', '3d', a commit SHA, or ISO date."},
+                "extensions": {"type": "array", "items": {"type": "string"}, "description": "Filter by extensions."},
+                "include_diff": {"type": "boolean", "description": "Include actual diff content. Default false.", "default": False},
+                "include_stats": {"type": "boolean", "default": True},
+                "include_uncommitted": {"type": "boolean", "description": "Include staged + unstaged changes. Default true.", "default": True}
+            },
+            "required": ["repo_path", "since"]
+        }
+    },
+    "explain_path": {
+        "name": "explain_path",
+        "description": "Find the shortest call chain between two functions. Shows how control flows from A to B through the call graph. Use for bug tracing, understanding data flow, and planning refactors.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "from_function": {"type": "string", "description": "Starting function name."},
+                "to_function": {"type": "string", "description": "Target function name."},
+                "repo_path": {"type": "string", "description": "Optional: restrict to one repository."},
+                "max_depth": {"type": "integer", "default": 6}
+            },
+            "required": ["from_function", "to_function"]
+        }
+    },
+    "get_file_structure": {
+        "name": "get_file_structure",
+        "description": "Returns directory tree of an indexed repository with function/class counts per file. Use for understanding project layout. Use get_module_overview for deeper module analysis.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo_path": {"type": "string", "description": "Repository path."},
+                "directory": {"type": "string", "description": "Optional: subdirectory scope."},
+                "extensions": {"type": "array", "items": {"type": "string"}},
+                "max_depth": {"type": "integer", "default": 4},
+                "include_counts": {"type": "boolean", "description": "Function/class counts per file. Default true.", "default": True}
+            },
+            "required": ["repo_path"]
+        }
+    },
 }

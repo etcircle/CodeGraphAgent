@@ -30,7 +30,10 @@ from .tools.handlers import (
     indexing_handlers,
     management_handlers,
     query_handlers,
-    watcher_handlers
+    watcher_handlers,
+    search_handlers,
+    context_handlers,
+    file_handlers,
 )
 
 DEFAULT_EDIT_DISTANCE = 2
@@ -176,6 +179,31 @@ class MCPServer:
     def get_watcher_health_tool(self, **args) -> Dict[str, Any]:
         return watcher_handlers.get_watcher_health(self.code_watcher, self.db_manager, **args)
 
+    # --- New Agent Productivity Tools ---
+
+    def grep_code_tool(self, **args) -> Dict[str, Any]:
+        return search_handlers.grep_code(self.db_manager, **args)
+
+    def get_file_content_tool(self, **args) -> Dict[str, Any]:
+        return file_handlers.get_file_content(self.db_manager, **args)
+
+    def get_function_context_tool(self, **args) -> Dict[str, Any]:
+        return context_handlers.get_function_context(self.db_manager, **args)
+
+    def get_module_overview_tool(self, **args) -> Dict[str, Any]:
+        return context_handlers.get_module_overview(self.db_manager, **args)
+
+    def find_references_tool(self, **args) -> Dict[str, Any]:
+        return search_handlers.find_references(self.db_manager, **args)
+
+    def diff_since_tool(self, **args) -> Dict[str, Any]:
+        return file_handlers.diff_since(self.db_manager, **args)
+
+    def explain_path_tool(self, **args) -> Dict[str, Any]:
+        return context_handlers.explain_path(self.db_manager, **args)
+
+    def get_file_structure_tool(self, **args) -> Dict[str, Any]:
+        return file_handlers.get_file_structure(self.db_manager, **args)
 
     async def handle_tool_call(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -202,6 +230,14 @@ class MCPServer:
             "search_registry_bundles": self.search_registry_bundles_tool,
             "get_repository_stats": self.get_repository_stats_tool,
             "get_watcher_health": self.get_watcher_health_tool,
+            "grep_code": self.grep_code_tool,
+            "get_file_content": self.get_file_content_tool,
+            "get_function_context": self.get_function_context_tool,
+            "get_module_overview": self.get_module_overview_tool,
+            "find_references": self.find_references_tool,
+            "diff_since": self.diff_since_tool,
+            "explain_path": self.explain_path_tool,
+            "get_file_structure": self.get_file_structure_tool,
         }
         handler = tool_map.get(tool_name)
         if handler:
