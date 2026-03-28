@@ -1,10 +1,11 @@
 
 # src/codegraphcontext/tools/graph_builder.py
 import asyncio
+import os
 import pathspec
 from pathlib import Path
 from typing import Any, Coroutine, Dict, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from ..core.database import DatabaseManager
 from ..core.jobs import JobManager, JobStatus
@@ -505,13 +506,16 @@ class GraphBuilder:
 
     # Second pass to create relationships that depend on all files being present like call functions and class inheritance
     def _safe_run_create(self, session, query, params) -> bool:
-        """Helper to run a creation query safely, catching exceptions and checking result."""
+        """Helper to run a creation query safely with retry on transient Neo4j errors."""
         try:
-            result = session.run(query, **params)
-            row = result.single()
-            return row is not None and row.get('created', 0) > 0
-        except Exception as e:
-            # Optionally log, but suppress to allow fallback
+            from ..core import get_database_manager
+            db_manager = get_database_manager()
+            def _run():
+                result = session.run(query, **params)
+                row = result.single()
+                return row is not None and row.get('created', 0) > 0
+            return db_manager.execute_with_retry(_run)
+        except Exception:
             return False
 
     def _create_function_calls(self, session, file_data: Dict, imports_map: dict):
@@ -937,6 +941,44 @@ class GraphBuilder:
                           DETACH DELETE r, e""", path=repo_path_str)
             info_logger(f"Deleted repository and its contents from graph: {repo_path_str}")
             return True
+
+    def delete_edges_for_file(self, file_path: str):
+        """Delete all CALLS and INHERITS edges originating FROM nodes in this file."""
+        with self.driver.session() as session:
+            session.run("""
+                MATCH (n {path: $path})-[r:CALLS]->()
+                DELETE r
+            """, path=file_path)
+            session.run("""
+                MATCH (n {path: $path})-[r:INHERITS]->()
+                DELETE r
+            """, path=file_path)
+
+    def acquire_repo_lock(self, repo_path: str, ttl_minutes: int = 5) -> bool:
+        """Set a lock node in Neo4j to prevent concurrent index + watch races.
+        Uses a TTL so crashed processes don't hold the lock forever."""
+        with self.driver.session() as session:
+            # First, clean up any expired locks
+            session.run("""
+                MATCH (lock:_Lock {path: $path})
+                WHERE lock.locked_at < datetime() - duration({minutes: $ttl})
+                DELETE lock
+            """, path=repo_path, ttl=ttl_minutes)
+
+            result = session.run("""
+                MERGE (lock:_Lock {path: $path})
+                ON CREATE SET lock.locked_at = datetime(), lock.pid = $pid
+                ON MATCH SET lock._exists = true
+                RETURN lock.pid as holder_pid, lock.locked_at as locked_at
+            """, path=repo_path, pid=os.getpid())
+            record = result.single()
+            return record is not None and record["holder_pid"] == os.getpid()
+
+    def release_repo_lock(self, repo_path: str):
+        """Release the advisory lock for a repo path."""
+        with self.driver.session() as session:
+            session.run("MATCH (lock:_Lock {path: $path, pid: $pid}) DELETE lock",
+                        path=repo_path, pid=os.getpid())
 
     def update_file_in_graph(self, path: Path, repo_path: Path, imports_map: dict):
         """Updates a single file's nodes in the graph."""

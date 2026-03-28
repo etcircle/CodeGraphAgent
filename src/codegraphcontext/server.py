@@ -30,7 +30,10 @@ from .tools.handlers import (
     indexing_handlers,
     management_handlers,
     query_handlers,
-    watcher_handlers
+    watcher_handlers,
+    search_handlers,
+    context_handlers,
+    file_handlers,
 )
 
 DEFAULT_EDIT_DISTANCE = 2
@@ -173,6 +176,70 @@ class MCPServer:
     def get_repository_stats_tool(self, **args) -> Dict[str, Any]:
         return management_handlers.get_repository_stats(self.code_finder, **args)
 
+    def get_watcher_health_tool(self, **args) -> Dict[str, Any]:
+        return watcher_handlers.get_watcher_health(self.code_watcher, self.db_manager, **args)
+
+    def cgc_guide_tool(self, **args) -> Dict[str, Any]:
+        return {
+            "success": True,
+            "guide": {
+                "primary_tools": {
+                    "get_module_overview": "Understand a module — endpoints, services, models, schemas in one call. Start here when exploring a new module.",
+                    "get_function_context": "Everything about a function — source (from filesystem), callers, callees, class, siblings. One call replaces 4-5 separate queries.",
+                    "grep_code": "Text/regex search across indexed repos. Use for string literals, error messages, API paths, config keys. Better than find_code.",
+                    "find_references": "All usages of a symbol — callers, importers, type annotations, text mentions. Broader than analyze_code_relationships.",
+                    "get_file_content": "Read source code with line numbers. Supports line ranges and around_line centering.",
+                    "diff_since": "What changed recently — git commits + uncommitted changes. Use for handoffs between agents.",
+                    "explain_path": "Shortest call chain from function A to function B. Use for tracing data flow and bugs.",
+                },
+                "secondary_tools": {
+                    "get_file_structure": "Project directory tree with function/class counts.",
+                    "find_most_complex_functions": "Tech debt triage — find refactoring targets.",
+                    "find_dead_code": "Find unused functions across the codebase.",
+                    "execute_cypher_query": "Raw Cypher fallback — use only when primary tools can't answer your question.",
+                },
+                "avoid": {
+                    "find_code": "Use grep_code instead (regex, context lines, file filtering).",
+                    "analyze_code_relationships": "Use find_references or get_function_context instead (more complete, fewer calls).",
+                    "calculate_cyclomatic_complexity": "Already included in get_function_context and get_module_overview output.",
+                },
+                "workflows": {
+                    "explore_new_module": "get_module_overview → get_function_context on key functions",
+                    "understand_function": "get_function_context (one call, not four)",
+                    "find_usages": "find_references (not analyze_code_relationships)",
+                    "search_text": "grep_code (not find_code)",
+                    "read_source": "get_file_content (not external filesystem tools)",
+                    "trace_bug": "explain_path from entry point to suspected cause",
+                    "pick_up_work": "diff_since to see what changed",
+                },
+            },
+        }
+
+    # --- New Agent Productivity Tools ---
+
+    def grep_code_tool(self, **args) -> Dict[str, Any]:
+        return search_handlers.grep_code(self.db_manager, **args)
+
+    def get_file_content_tool(self, **args) -> Dict[str, Any]:
+        return file_handlers.get_file_content(self.db_manager, **args)
+
+    def get_function_context_tool(self, **args) -> Dict[str, Any]:
+        return context_handlers.get_function_context(self.db_manager, **args)
+
+    def get_module_overview_tool(self, **args) -> Dict[str, Any]:
+        return context_handlers.get_module_overview(self.db_manager, **args)
+
+    def find_references_tool(self, **args) -> Dict[str, Any]:
+        return search_handlers.find_references(self.db_manager, **args)
+
+    def diff_since_tool(self, **args) -> Dict[str, Any]:
+        return file_handlers.diff_since(self.db_manager, **args)
+
+    def explain_path_tool(self, **args) -> Dict[str, Any]:
+        return context_handlers.explain_path(self.db_manager, **args)
+
+    def get_file_structure_tool(self, **args) -> Dict[str, Any]:
+        return file_handlers.get_file_structure(self.db_manager, **args)
 
     async def handle_tool_call(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -197,7 +264,17 @@ class MCPServer:
             "unwatch_directory": self.unwatch_directory_tool,
             "load_bundle": self.load_bundle_tool,
             "search_registry_bundles": self.search_registry_bundles_tool,
-            "get_repository_stats": self.get_repository_stats_tool
+            "get_repository_stats": self.get_repository_stats_tool,
+            "get_watcher_health": self.get_watcher_health_tool,
+            "grep_code": self.grep_code_tool,
+            "get_file_content": self.get_file_content_tool,
+            "get_function_context": self.get_function_context_tool,
+            "get_module_overview": self.get_module_overview_tool,
+            "find_references": self.find_references_tool,
+            "diff_since": self.diff_since_tool,
+            "explain_path": self.explain_path_tool,
+            "get_file_structure": self.get_file_structure_tool,
+            "cgc_guide": self.cgc_guide_tool,
         }
         handler = tool_map.get(tool_name)
         if handler:
@@ -214,7 +291,19 @@ class MCPServer:
         # info_logger("MCP Server is running. Waiting for requests...")
         print("MCP Server is running. Waiting for requests...", file=sys.stderr, flush=True)
         self.code_watcher.start()
-        
+
+        # Auto-start watchers from persisted config
+        auto_paths = os.getenv('CGC_AUTO_WATCH_PATHS', '')
+        if auto_paths:
+            for watch_path in auto_paths.split(':'):
+                watch_path = watch_path.strip()
+                if watch_path and Path(watch_path).is_dir():
+                    try:
+                        self.watch_directory_tool(path=watch_path)
+                        info_logger(f"Auto-started watcher for: {watch_path}")
+                    except Exception as e:
+                        error_logger(f"Failed to auto-start watcher for {watch_path}: {e}")
+
         loop = asyncio.get_event_loop()
         while True:
             try:
