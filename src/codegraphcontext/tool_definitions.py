@@ -222,7 +222,7 @@ TOOLS = {
     },
     "get_file_content": {
         "name": "get_file_content",
-        "description": "Read source code from a file in an indexed repository. Returns content with line numbers. Security-scoped: only reads files within indexed repos. Use after find_code or grep_code to read actual source.",
+        "description": "Read source code from a file in an indexed repository. Returns content with line numbers. ALWAYS use this instead of Desktop Commander or external filesystem tools for reading source — it's faster and stays within the MCP boundary. Supports: full file, line ranges (start_line/end_line), or centered view (around_line + context_lines). Example: around_line=150, context_lines=50 gives you 100 lines centered on line 150.",
         "inputSchema": {
             "type": "object",
             "properties": {
