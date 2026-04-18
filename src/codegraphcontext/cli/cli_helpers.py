@@ -135,6 +135,82 @@ async def _run_index_with_progress(graph_builder: GraphBuilder, path_obj: Path, 
             raise e
 
 
+def _print_verification_summary(verification: dict):
+    """Render repository verification results to the CLI."""
+    status = "clean" if verification["is_clean"] else "mismatch"
+    style = "green" if verification["is_clean"] else "red"
+    console.print(
+        f"[{style}]Verification {status}:[/{style}] "
+        f"expected={verification['expected_count']} indexed={verification['indexed_count']} "
+        f"missing={verification['missing_count']} extra={verification['extra_count']}"
+    )
+    if verification["missing_paths"]:
+        console.print("[yellow]Sample missing paths:[/yellow]")
+        for path in verification["missing_paths"]:
+            console.print(f"  - {path}")
+    if verification["extra_paths"]:
+        console.print("[yellow]Sample extra paths:[/yellow]")
+        for path in verification["extra_paths"]:
+            console.print(f"  - {path}")
+
+
+def _resolve_verify_path(path_obj: Path, code_finder: CodeFinder) -> Path:
+    """Resolve an arbitrary file/subdir path to its indexed repository root when possible."""
+    resolved = path_obj.resolve()
+    indexed_repos = []
+    for repo in code_finder.list_indexed_repositories():
+        repo_path = repo.get("path")
+        if not repo_path:
+            continue
+        try:
+            indexed_repos.append(Path(repo_path).resolve())
+        except Exception:
+            continue
+
+    if resolved in indexed_repos:
+        return resolved
+
+    containing_repos = []
+    for repo_path in indexed_repos:
+        try:
+            resolved.relative_to(repo_path)
+            containing_repos.append(repo_path)
+        except ValueError:
+            continue
+
+    if containing_repos:
+        return max(containing_repos, key=lambda repo_path: len(repo_path.parts))
+    return resolved
+
+
+def verify_helper(path: str) -> bool:
+    """Verify indexed File nodes match the repository's expected file inventory."""
+    services = _initialize_services()
+    if not all(services):
+        return False
+
+    db_manager, graph_builder, code_finder = services
+    path_obj = Path(path).resolve()
+
+    try:
+        if not path_obj.exists():
+            console.print(f"[red]Error: Path does not exist: {path_obj}[/red]")
+            return False
+
+        verify_path = _resolve_verify_path(path_obj, code_finder)
+        if verify_path != path_obj:
+            console.print(f"[dim]Resolved verify target to indexed repo root: {verify_path}[/dim]")
+
+        verification = graph_builder.verify_repository_index(verify_path)
+        _print_verification_summary(verification)
+        return verification["is_clean"]
+    except Exception as e:
+        console.print(f"[bold red]Verification failed:[/bold red] {e}")
+        return False
+    finally:
+        db_manager.close_driver()
+
+
 def index_helper(path: str):
     """Synchronously indexes a repository."""
     time_start = time.time()
@@ -633,7 +709,7 @@ def reindex_helper(path: str):
     time_start = time.time()
     services = _initialize_services()
     if not all(services):
-        return
+        return False
 
     db_manager, graph_builder, code_finder = services
     path_obj = Path(path).resolve()
@@ -641,7 +717,7 @@ def reindex_helper(path: str):
     if not path_obj.exists():
         console.print(f"[red]Error: Path does not exist: {path_obj}[/red]")
         db_manager.close_driver()
-        return
+        return False
 
     # Check if already indexed
     indexed_repos = code_finder.list_indexed_repositories()
@@ -655,17 +731,27 @@ def reindex_helper(path: str):
         except Exception as e:
             console.print(f"[red]Error deleting old index: {e}[/red]")
             db_manager.close_driver()
-            return
+            return False
     
     console.print(f"[cyan]Re-indexing: {path_obj}[/cyan]")
     
     try:
         asyncio.run(_run_index_with_progress(graph_builder, path_obj, is_dependency=False))
+        verification = graph_builder.verify_repository_index(path_obj)
+        _print_verification_summary(verification)
+        if not verification["is_clean"]:
+            raise RuntimeError(
+                "Repository verification failed after re-index: "
+                f"missing={verification['missing_count']} extra={verification['extra_count']}"
+            )
+
         time_end = time.time()
         elapsed = time_end - time_start
         console.print(f"[green]Successfully re-indexed: {path} in {elapsed:.2f} seconds[/green]")
+        return True
     except Exception as e:
         console.print(f"[bold red]An error occurred during re-indexing:[/bold red] {e}")
+        return False
     finally:
         db_manager.close_driver()
 

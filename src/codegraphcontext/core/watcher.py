@@ -18,6 +18,8 @@ import pathspec
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
+from codegraphcontext.tools.graph_builder import DEFAULT_IGNORE_PATTERNS
+
 if typing.TYPE_CHECKING:
     from codegraphcontext.tools.graph_builder import GraphBuilder
     from codegraphcontext.core.jobs import JobManager
@@ -138,14 +140,17 @@ class RepositoryEventHandler(FileSystemEventHandler):
         self._start_reconciliation_timer()
 
     def _load_gitignore(self) -> pathspec.PathSpec:
-        """Load .gitignore patterns from the repo root, combined with IGNORE_DIRS."""
-        patterns = list(IGNORE_DIRS)
-        gitignore_path = self.repo_path / '.gitignore'
-        if gitignore_path.is_file():
+        """Load watcher ignore patterns from .cgcignore + built-ins."""
+        patterns = list(DEFAULT_IGNORE_PATTERNS)
+        patterns.extend(IGNORE_DIRS)
+
+        ignore_path = self.repo_path / '.cgcignore'
+        if ignore_path.is_file():
             try:
-                patterns.extend(gitignore_path.read_text().splitlines())
+                patterns.extend(ignore_path.read_text().splitlines())
             except OSError:
                 pass
+
         return pathspec.PathSpec.from_lines("gitignore", patterns)
 
     def _should_ignore(self, path_str: str) -> bool:
@@ -167,6 +172,16 @@ class RepositoryEventHandler(FileSystemEventHandler):
         return False
 
     @staticmethod
+    def _minimal_file_data(path: Path) -> dict:
+        """Placeholder cache entry for files without a structural parser."""
+        return {
+            "path": str(path.resolve()),
+            "functions": [],
+            "classes": [],
+            "imports": [],
+        }
+
+    @staticmethod
     def _is_file_stable(path: Path, wait_ms: int = 300) -> bool:
         """Check if a file's mtime has stabilised (editors do write-to-temp-then-rename)."""
         try:
@@ -178,12 +193,10 @@ class RepositoryEventHandler(FileSystemEventHandler):
             return False
 
     def _get_supported_files(self):
-        """Get all supported source files, excluding ignored paths."""
-        supported_extensions = self.graph_builder.parsers.keys()
+        """Get all indexable files, excluding ignored paths."""
         return [
             f for f in self.repo_path.rglob("*")
-            if f.is_file() and f.suffix in supported_extensions
-            and not self._should_ignore(str(f))
+            if f.is_file() and not self._should_ignore(str(f))
         ]
 
     def _initial_scan(self):
@@ -220,15 +233,21 @@ class RepositoryEventHandler(FileSystemEventHandler):
             if len(files_to_parse) < len(current_paths) * 0.5:
                 # Less than 50% changed — incremental is worth it
                 for f_str in files_to_parse:
-                    parsed = self.graph_builder.parse_file(self.repo_path, Path(f_str))
+                    file_path = Path(f_str)
+                    parsed = self.graph_builder.parse_file(self.repo_path, file_path)
                     if "error" not in parsed:
                         self.all_file_data[f_str] = parsed
+                    else:
+                        self.all_file_data[f_str] = self._minimal_file_data(file_path)
 
                 # Also parse unchanged files for the in-memory cache (needed for re-linking)
                 for f_str in unchanged_files:
-                    parsed = self.graph_builder.parse_file(self.repo_path, Path(f_str))
+                    file_path = Path(f_str)
+                    parsed = self.graph_builder.parse_file(self.repo_path, file_path)
                     if "error" not in parsed:
                         self.all_file_data[f_str] = parsed
+                    else:
+                        self.all_file_data[f_str] = self._minimal_file_data(file_path)
 
                 self.imports_map = self.graph_builder._pre_scan_for_imports(
                     [Path(p) for p in self.all_file_data]
@@ -252,6 +271,8 @@ class RepositoryEventHandler(FileSystemEventHandler):
             parsed_data = self.graph_builder.parse_file(self.repo_path, f)
             if "error" not in parsed_data:
                 self.all_file_data[f_str] = parsed_data
+            else:
+                self.all_file_data[f_str] = self._minimal_file_data(f)
 
         all_data = list(self.all_file_data.values())
         self.graph_builder._create_all_function_calls(all_data, self.imports_map)
@@ -368,7 +389,6 @@ class RepositoryEventHandler(FileSystemEventHandler):
         all_paths = paths | retry_paths
         info_logger(f"Processing batch of {len(all_paths)} file(s) ({len(retry_paths)} retries)")
 
-        supported_extensions = self.graph_builder.parsers.keys()
         batch_errors = 0
         successfully_processed = set()
 
@@ -376,8 +396,7 @@ class RepositoryEventHandler(FileSystemEventHandler):
         for path_str in all_paths:
             try:
                 modified_path = Path(path_str)
-                if (modified_path.exists() and modified_path.is_file()
-                        and modified_path.suffix in supported_extensions):
+                if modified_path.exists() and modified_path.is_file():
                     # File stability check: wait for editor save to finish
                     if not self._is_file_stable(modified_path):
                         warning_logger(f"File not stable yet, deferring: {path_str}")
@@ -390,7 +409,7 @@ class RepositoryEventHandler(FileSystemEventHandler):
                     if "error" not in parsed_data:
                         self.all_file_data[str(modified_path)] = parsed_data
                     else:
-                        self.all_file_data.pop(str(modified_path), None)
+                        self.all_file_data[str(modified_path)] = self._minimal_file_data(modified_path)
                 else:
                     self.all_file_data.pop(path_str, None)
                 successfully_processed.add(path_str)
@@ -582,31 +601,26 @@ class RepositoryEventHandler(FileSystemEventHandler):
     def on_created(self, event):
         if not event.is_directory and not self._should_ignore(event.src_path):
             path = self._normalise_path(event.src_path)
-            if Path(path).suffix in self.graph_builder.parsers:
-                self._debounce(path)
+            self._debounce(path)
 
     def on_modified(self, event):
         if not event.is_directory and not self._should_ignore(event.src_path):
             path = self._normalise_path(event.src_path)
-            if Path(path).suffix in self.graph_builder.parsers:
-                self._debounce(path)
+            self._debounce(path)
 
     def on_deleted(self, event):
         if not event.is_directory and not self._should_ignore(event.src_path):
             path = self._normalise_path(event.src_path)
-            if Path(path).suffix in self.graph_builder.parsers:
-                self._debounce(path)
+            self._debounce(path)
 
     def on_moved(self, event):
         if not event.is_directory:
             if not self._should_ignore(event.src_path):
                 path = self._normalise_path(event.src_path)
-                if Path(path).suffix in self.graph_builder.parsers:
-                    self._debounce(path)
+                self._debounce(path)
             if not self._should_ignore(event.dest_path):
                 dest = self._normalise_path(event.dest_path)
-                if Path(dest).suffix in self.graph_builder.parsers:
-                    self._debounce(dest)
+                self._debounce(dest)
 
 
 class CodeWatcher:

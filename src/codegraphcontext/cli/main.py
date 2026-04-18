@@ -38,6 +38,7 @@ from .cli_helpers import (
     reindex_helper,
     clean_helper,
     stats_helper,
+    verify_helper,
     _initialize_services,
     watch_helper,
     unwatch_helper,
@@ -883,9 +884,24 @@ def index(
     
     if force:
         console.print("[yellow]Force re-indexing (--force flag detected)[/yellow]")
-        reindex_helper(path)
+        if not reindex_helper(path):
+            raise typer.Exit(code=1)
     else:
         index_helper(path)
+
+@app.command()
+def verify(
+    path: Optional[str] = typer.Argument(None, help="Path to the directory or file to verify. Defaults to the current directory.")
+):
+    """
+    Verify that a repository's indexed File nodes match the expected filesystem inventory.
+    """
+    _load_credentials()
+    if path is None:
+        path = str(Path.cwd())
+
+    if not verify_helper(path):
+        raise typer.Exit(code=1)
 
 @app.command()
 def clean():
