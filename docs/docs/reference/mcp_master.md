@@ -14,7 +14,7 @@ These are the most commonly used tools for understanding code.
 
 | Tool Name | Description | Natural Language Example |
 | :--- | :--- | :--- |
-| **`find_code`** | Search for code by name or fuzzy text. | "Where is the `User` class defined?" |
+| **`find_name_substring`** | Search symbol names by substring. Use `grep_code` for source text. | "Where is the `User` class defined?" |
 | **`analyze_code_relationships`** | The swiss-army knife for call graphs and dependencies. | "Find all callers of `process_payment`." |
 | **`calculate_cyclomatic_complexity`** | Measure function complexity. | "What is the complexity of `main`?" |
 | **`find_most_complex_functions`** | List the hardest-to-maintain functions. | "Show me the 5 most complex functions." |

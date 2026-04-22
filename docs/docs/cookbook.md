@@ -8,7 +8,7 @@ This cookbook provides examples of how to use the `mcp` tool to query and unders
 
 ### 1. Find a specific function by name
 - **Natural Language:** "Where is the function `foo` defined?"
-- **Tool:** `find_code`
+- **Tool:** `find_name_substring`
 - **JSON Arguments:**
 ```json
 {

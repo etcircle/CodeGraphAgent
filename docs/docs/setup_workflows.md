@@ -322,7 +322,7 @@ cgc mcp start
 # ✓ Watching for file changes: enabled
 # 
 # Available tools: 18
-#   - find_code
+#   - find_name_substring
 #   - analyze_code_relationships
 #   - find_dead_code
 #   - execute_cypher_query
@@ -355,7 +355,7 @@ cgc mcp start
 > "I have access to 18 CodeGraphContext tools:
 > 
 > **Code Discovery:**
-> - find_code - Search for functions, classes, files
+> - find_name_substring - Search symbol names by substring
 > - list_indexed_repositories - Show indexed projects
 > 
 > **Code Analysis:**

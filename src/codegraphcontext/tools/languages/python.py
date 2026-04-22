@@ -424,7 +424,7 @@ class PythonTreeSitterParser:
         Example pattern:
             tool_map = {
                 "add_code": self.add_code_to_graph_tool,
-                "find_code": self.find_code_tool,
+                "find_name_substring": self.find_name_substring_tool,
             }
             handler = tool_map.get(tool_name)
             if handler:

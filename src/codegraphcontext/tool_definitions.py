@@ -26,12 +26,16 @@ TOOLS = {
         "description": "List all background jobs and their current status.",
         "inputSchema": {"type": "object", "properties": {}}
     },
-    "find_code": {
-        "name": "find_code",
-        "description": "Find relevant code snippets related to a keyword (e.g., function name, class name, or content).",
+    "find_name_substring": {
+        "name": "find_name_substring",
+        "description": "Find functions, classes, modules, and variables whose names contain a substring. This is name-only search, not source-text search. Use grep_code for string literals, JSX attributes, config keys, and other text inside files.",
         "inputSchema": {
             "type": "object",
-            "properties": { "query": {"type": "string", "description": "Keyword or phrase to search for"}, "fuzzy_search": {"type": "boolean", "description": "Whether to use fuzzy search", "default": False}, "edit_distance": {"type": "number", "description": "Edit distance for fuzzy search (between 0-2)", "default": 2}, "repo_path": {"type": "string", "description": "Optional: Path to the repository to restrict the search to."}}, 
+            "properties": {
+                "query": {"type": "string", "description": "Substring to search for in symbol names."},
+                "repo_path": {"type": "string", "description": "Optional: Path to the repository to restrict the search to."},
+                "case_sensitive": {"type": "boolean", "description": "Whether to use case-sensitive matching.", "default": False}
+            }, 
             "required": ["query"]
         }
     },
@@ -204,7 +208,7 @@ TOOLS = {
     },
     "grep_code": {
         "name": "grep_code",
-        "description": "Search for a text pattern or regex across indexed repositories. Returns matching lines with file paths, line numbers, and context. Use this for: string literals, error messages, API paths, config keys, TODO/FIXME comments. Use find_code for symbol name lookups. Use find_references for comprehensive 'who uses this symbol' queries.",
+        "description": "Search for a text pattern or regex across indexed repositories. Returns matching lines with file paths, line numbers, and context. Use this for: string literals, error messages, API paths, config keys, TODO/FIXME comments. Use find_name_substring for symbol name lookups. Use find_references for comprehensive 'who uses this symbol' queries.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -238,7 +242,7 @@ TOOLS = {
     },
     "get_function_context": {
         "name": "get_function_context",
-        "description": "Returns comprehensive context for a function: source code (from filesystem), class membership, callers, callees, imports, and sibling methods. Use this when you need to understand a function before modifying it. Use find_code for simple name lookups. Use grep_code for text/pattern searches.",
+        "description": "Returns comprehensive context for a function: source code (from filesystem), class membership, callers, callees, imports, and sibling methods. Use this when you need to understand a function before modifying it. Use find_name_substring for simple name lookups. Use grep_code for text/pattern searches.",
         "inputSchema": {
             "type": "object",
             "properties": {

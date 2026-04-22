@@ -97,6 +97,36 @@ class CodeFinder:
             
             return result.data()
 
+    def find_name_substring(
+        self,
+        search_term: str,
+        repo_path: Optional[str] = None,
+        case_sensitive: bool = False,
+    ) -> List[Dict]:
+        """Find code symbols whose names contain the given substring."""
+        name_filter = "n.name CONTAINS $search_term" if case_sensitive else "toLower(n.name) CONTAINS toLower($search_term)"
+        repo_filter = "AND n.path STARTS WITH $repo_path" if repo_path else ""
+
+        with self.driver.session() as session:
+            result = session.run(
+                f"""
+                    MATCH (n)
+                    WHERE (n:Function OR n:Class OR n:Module OR n:Variable)
+                      AND {name_filter} {repo_filter}
+                    RETURN
+                        labels(n)[0] as type,
+                        n.name as name,
+                        n.path as path,
+                        n.line_number as line_number,
+                        n.is_dependency as is_dependency
+                    ORDER BY n.is_dependency ASC, n.name
+                    LIMIT 50
+                """,
+                search_term=search_term,
+                repo_path=repo_path,
+            )
+            return result.data()
+
     def find_by_content(self, search_term: str, repo_path: Optional[str] = None) -> List[Dict]:
         """Find code by content matching in source or docstrings using the full-text index."""
         if self._is_falkordb:

@@ -407,7 +407,12 @@ def config_reset():
         console.print("[yellow]Reset cancelled[/yellow]")
 
 @config_app.command("db")
-def config_db(backend: str = typer.Argument(..., help="Database backend: 'neo4j' or 'falkordb'")):
+def config_db(
+    backend: str = typer.Argument(
+        ...,
+        help="Database backend: 'falkordb', 'falkordb-remote', or 'neo4j'",
+    )
+):
     """
     Quickly switch the default database backend.
     
@@ -1192,20 +1197,20 @@ def find_by_name(
     finally:
         db_manager.close_driver()
 
-@find_app.command("pattern")
-def find_by_pattern(
+@find_app.command("name-substring")
+def find_by_name_substring(
     ctx: typer.Context,
-    pattern: str = typer.Argument(..., help="Substring pattern to search (fuzzy search fallback)"),
+    pattern: str = typer.Argument(..., help="Substring to search for in symbol names"),
     case_sensitive: bool = typer.Option(False, "--case-sensitive", "-c", help="Case-sensitive search"),
     visual: bool = typer.Option(False, "--visual", "--viz", "-V", help="Show results as interactive graph visualization")
 ):
     """
-    Find code elements using substring matching.
+    Find code elements by substring match on their names.
     
     Examples:
-        cgc find pattern "Auth"       # Finds Auth, Authentication, Authorize...
-        cgc find pattern "process_"   # Finds process_data, process_request...
-        cgc find pattern "Auth" --visual
+        cgc find name-substring "Auth"       # Finds Auth, Authentication, Authorize...
+        cgc find name-substring "process_"   # Finds process_data, process_request...
+        cgc find name-substring "Auth" --visual
     """
     _load_credentials()
     services = _initialize_services()
@@ -1250,12 +1255,12 @@ def find_by_pattern(
             results = [dict(record) for record in result]
         
         if not results:
-            console.print(f"[yellow]No matches found for pattern '{pattern}'[/yellow]")
+            console.print(f"[yellow]No name matches found for substring '{pattern}'[/yellow]")
             return
         
         # Check if visual mode is enabled
         if check_visual_flag(ctx, visual):
-            visualize_search_results(results, pattern, search_type="pattern")
+            visualize_search_results(results, pattern, search_type="name-substring")
             return
             
         if not case_sensitive and any(c in pattern for c in "*?["):
@@ -1279,7 +1284,7 @@ def find_by_pattern(
                 "📦 Dependency" if res.get('is_dependency') else "📝 Project"
             )
             
-        console.print(f"[cyan]Found {len(results)} matches for pattern '{pattern}':[/cyan]")
+        console.print(f"[cyan]Found {len(results)} name matches for substring '{pattern}':[/cyan]")
         console.print(table)
     finally:
         db_manager.close_driver()
@@ -1414,9 +1419,9 @@ def find_by_content_search(
                 console.print("[yellow]💡 You have two options:[/yellow]\n")
                 console.print("  1. [cyan]Switch to Neo4j:[/cyan]")
                 console.print(f"     [dim]cgc --database neo4j find content \"{query}\"[/dim]\n")
-                console.print("  2. [cyan]Use pattern search instead:[/cyan]")
-                console.print(f"     [dim]cgc find pattern \"{query}\"[/dim]")
-                console.print("     [dim](searches in names only, not source code)[/dim]\n")
+                console.print("  2. [cyan]Use name-substring search instead:[/cyan]")
+                console.print(f"     [dim]cgc find name-substring \"{query}\"[/dim]")
+                console.print("     [dim](searches symbol names only, not source code)[/dim]\n")
                 return
             else:
                 # Re-raise if it's a different error

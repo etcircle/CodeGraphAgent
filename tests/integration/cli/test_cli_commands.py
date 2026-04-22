@@ -45,6 +45,13 @@ class TestCLICommands:
         # Output might be empty in some test envs, checking exit code is enough integration test
         # assert "No such command" in result.stdout
 
+    def test_find_help_exposes_name_substring_not_pattern(self):
+        result = runner.invoke(app, ["find", "--help"])
+
+        assert result.exit_code == 0
+        assert "name-substring" in result.stdout
+        assert "pattern" not in result.stdout
+
 
 class TestNeo4jDatabaseNameCLI:
     """Integration tests for NEO4J_DATABASE display in CLI commands."""

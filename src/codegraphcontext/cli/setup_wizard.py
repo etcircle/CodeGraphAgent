@@ -77,7 +77,7 @@ def _generate_mcp_json(creds):
                 "tools": {
                     "alwaysAllow": [
                         "add_code_to_graph", "add_package_to_graph",
-                        "check_job_status", "list_jobs", "find_code",
+                        "check_job_status", "list_jobs", "find_name_substring",
                         "analyze_code_relationships", "watch_directory",
                         "find_dead_code", "execute_cypher_query",
                         "calculate_cyclomatic_complexity", "find_most_complex_functions",
@@ -417,7 +417,7 @@ def configure_mcp_client():
                 "tools": {
                     "alwaysAllow": [
                         "add_code_to_graph", "add_package_to_graph",
-                        "check_job_status", "list_jobs", "find_code",
+                        "check_job_status", "list_jobs", "find_name_substring",
                         "analyze_code_relationships", "watch_directory",
                         "find_dead_code", "execute_cypher_query",
                         "calculate_cyclomatic_complexity", "find_most_complex_functions",

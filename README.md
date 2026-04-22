@@ -2,7 +2,7 @@
 
 **Turn your codebase into a queryable knowledge graph for AI agents.**
 
-An MCP server that indexes local code into Neo4j and exposes high-level tools designed for how AI agents actually work — not raw database queries, but purpose-built operations like "tell me everything about this function" or "what does this module do?"
+An MCP server that indexes local code into a queryable graph database and exposes high-level tools designed for how AI agents actually work — not raw database queries, but purpose-built operations like "tell me everything about this function" or "what does this module do?"
 
 Fork of [CodeGraphContext](https://github.com/CodeGraphContext/CodeGraphContext) with a fundamentally different focus: **agent productivity over IDE integration.**
 
@@ -26,7 +26,12 @@ CodeGraphAgent addresses all of these.
 ### Prerequisites
 
 - **Python 3.13+**
-- **Neo4j 5.x** — local, Docker, or remote. Community Edition works fine.
+- **Local-first graph backend by default**:
+  - **FalkorDB Lite** on supported Unix/Python 3.12+ setups
+  - **KùzuDB** as the cross-platform embedded fallback
+- **Optional server-backed backends**:
+  - **FalkorDB server** (self-hosted locally or remote via `FALKORDB_HOST`)
+  - **Neo4j 5.x** — local, Docker, or remote. Community Edition works fine.
 - **ripgrep** (`rg`) — optional but recommended (10-100x faster `grep_code`)
 - **git** — required for `diff_since` tool
 
@@ -64,7 +69,18 @@ The `cgc` command is your CLI entry point for all operations.
 
 ## Setup
 
-### 1. Configure Neo4j Connection
+### 1. Choose Your Backend
+
+**Default local-first path:** you usually do not need Neo4j to get started.
+
+- `DEFAULT_DATABASE=falkordb` → embedded FalkorDB Lite on supported Unix setups
+- `DEFAULT_DATABASE=kuzudb` → embedded cross-platform fallback
+- `DEFAULT_DATABASE=falkordb-remote` → use a self-hosted or hosted FalkorDB server
+- `DEFAULT_DATABASE=neo4j` → use Neo4j explicitly
+
+By default, CodeGraphAgent stays local-first and only needs a server-backed database when you explicitly want one.
+
+### 2. Configure Neo4j (Optional)
 
 Create a `.env` file in your project root or `~/.codegraphcontext/.env`:
 
@@ -93,7 +109,7 @@ docker run -d \
   neo4j:5-community
 ```
 
-### 2. Index Your Codebase
+### 3. Index Your Codebase
 
 ```bash
 # Index one or more repositories
@@ -113,7 +129,7 @@ cgc stats
 
 Indexing uses tree-sitter parsing — supports 18 languages and typically processes 500-1000 files per minute.
 
-### 3. Start the File Watchers
+### 4. Start the File Watchers
 
 Watchers keep the graph in sync as code changes. **This is critical** — without watchers, the graph goes stale as soon as anyone edits a file.
 
@@ -183,7 +199,7 @@ cat /tmp/cgc-watch/backend-health.json
 # Call get_watcher_health from any MCP client
 ```
 
-### 4. Start the MCP Server
+### 5. Start the MCP Server
 
 #### Stdio Mode (IDE Integration — Claude Code, Cursor, VS Code)
 
@@ -339,7 +355,7 @@ These still work but the primary tools are better:
 
 | Legacy Tool | Use Instead |
 |-------------|-------------|
-| `find_code` | `grep_code` — regex support, context lines, file filtering |
+| `find_name_substring` | `grep_code` — use `find_name_substring` for partial symbol names; use `grep_code` for source text, literals, and config keys |
 | `analyze_code_relationships` | `find_references` + `get_function_context` |
 | `calculate_cyclomatic_complexity` | `get_function_context` or `get_module_overview` (complexity included) |
 

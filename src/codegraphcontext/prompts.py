@@ -18,7 +18,7 @@ You have access to a code graph database (Neo4j) with indexed repositories. Use 
 |----------|------|-------|
 | "What does this module do?" | `get_module_overview` | Endpoints, services, models, schemas in one call |
 | "Tell me about this function" | `get_function_context` | Source + callers + callees + class + siblings |
-| "Search for a string/pattern" | `grep_code` | Regex support, context lines. Better than find_code for text |
+| "Search for a string/pattern" | `grep_code` | Regex support, context lines. Better than find_name_substring for text |
 | "Who uses this symbol?" | `find_references` | Graph + grep hybrid. Broader than analyze_code_relationships |
 | "Show me this file" | `get_file_content` | Line ranges, around_line centering |
 | "What changed recently?" | `diff_since` | Git history + uncommitted changes |
@@ -31,7 +31,8 @@ You have access to a code graph database (Neo4j) with indexed repositories. Use 
 - **Exploring a new module:** `get_module_overview` → then `get_function_context` on key functions
 - **Understanding a function before changing it:** `get_function_context` (one call, not four)
 - **Finding where something is used:** `find_references` (not analyze_code_relationships)
-- **Searching for strings/patterns:** `grep_code` (not find_code)
+- **Finding a symbol by partial name:** `find_name_substring`
+- **Searching for strings/patterns:** `grep_code` (not find_name_substring)
 - **Reading source code:** `get_file_content` (not Desktop Commander/filesystem tools)
 - **Project structure:** `get_file_structure` with `include_counts=true`
 - **Picking up another agent's work:** `diff_since`
@@ -41,7 +42,6 @@ You have access to a code graph database (Neo4j) with indexed repositories. Use 
 
 | Instead of... | Use... | Why |
 |---------------|--------|-----|
-| `find_code` (keyword search) | `grep_code` | Regex, context lines, file pattern filtering |
 | `analyze_code_relationships` | `find_references` or `get_function_context` | More complete, fewer calls |
 | `calculate_cyclomatic_complexity` | `get_function_context` or `get_module_overview` | Complexity is included in output |
 

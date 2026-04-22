@@ -208,7 +208,7 @@
         {
             "location": "cookbook/#1-find-a-specific-function-by-name",
             "title": "1. Find a specific function by name",
-            "text": "<ul> <li>Natural Language: \"Where is the function <code>foo</code> defined?\"</li> <li>Tool: <code>find_code</code></li> <li>JSON Arguments: <pre><code>{\n  \"query\": \"foo\"\n}\n</code></pre></li> </ul>"
+            "text": "<ul> <li>Natural Language: \"Where is the function <code>foo</code> defined?\"</li> <li>Tool: <code>find_name_substring</code></li> <li>JSON Arguments: <pre><code>{\n  \"query\": \"foo\"\n}\n</code></pre></li> </ul>"
         },
         {
             "location": "cookbook/#2-find-all-calls-to-a-specific-function",
@@ -778,7 +778,7 @@
         {
             "location": "setup_workflows/#step-6-verify-mcp-integration",
             "title": "Step 6: Verify MCP Integration",
-            "text": "<p>In Cursor/VS Code:</p> <ol> <li>Open your IDE</li> <li>Start a new chat with AI assistant</li> <li>Ask: \"What CodeGraphContext tools do you have?\"</li> </ol> <p>Expected AI Response:</p> <p>\"I have access to 18 CodeGraphContext tools:</p> <p>Code Discovery: - find_code - Search for functions, classes, files - list_indexed_repositories - Show indexed projects</p> <p>Code Analysis: - analyze_code_relationships - Find callers, callees, call chains - find_dead_code - Find unused functions - find_most_complex_functions - Find complex code - calculate_cyclomatic_complexity - Measure function complexity</p> <p>Graph Queries: - execute_cypher_query - Run custom graph queries - visualize_graph_query - Generate graph visualizations</p> <p>... (10 more tools)</p> <p>How can I help you explore your codebase?\"</p> <p>Test with a real query:</p> <p>Ask AI: \"Find all functions that call <code>authenticate</code>\"</p> <p>Expected AI Response:</p> <p>\"I found 12 functions that call <code>authenticate</code>:</p> <p>Direct callers (3): 1. <code>login</code> in api/auth.py:45 2. <code>verify_token</code> in middleware/auth.py:89 3. <code>refresh_session</code> in api/session.py:123</p> <p>Indirect callers (9 more): ... (AI lists them)</p> <p>Would you like me to show the call chain for any of these?\"</p> <p>\u2705 MCP Setup Complete! Your AI assistant now has code intelligence.</p>"
+            "text": "<p>In Cursor/VS Code:</p> <ol> <li>Open your IDE</li> <li>Start a new chat with AI assistant</li> <li>Ask: \"What CodeGraphContext tools do you have?\"</li> </ol> <p>Expected AI Response:</p> <p>\"I have access to 18 CodeGraphContext tools:</p> <p>Code Discovery: - find_name_substring - Search symbol names by substring - list_indexed_repositories - Show indexed projects</p> <p>Code Analysis: - analyze_code_relationships - Find callers, callees, call chains - find_dead_code - Find unused functions - find_most_complex_functions - Find complex code - calculate_cyclomatic_complexity - Measure function complexity</p> <p>Graph Queries: - execute_cypher_query - Run custom graph queries - visualize_graph_query - Generate graph visualizations</p> <p>... (10 more tools)</p> <p>How can I help you explore your codebase?\"</p> <p>Test with a real query:</p> <p>Ask AI: \"Find all functions that call <code>authenticate</code>\"</p> <p>Expected AI Response:</p> <p>\"I found 12 functions that call <code>authenticate</code>:</p> <p>Direct callers (3): 1. <code>login</code> in api/auth.py:45 2. <code>verify_token</code> in middleware/auth.py:89 3. <code>refresh_session</code> in api/session.py:123</p> <p>Indirect callers (9 more): ... (AI lists them)</p> <p>Would you like me to show the call chain for any of these?\"</p> <p>\u2705 MCP Setup Complete! Your AI assistant now has code intelligence.</p>"
         },
         {
             "location": "setup_workflows/#every-time-workflow-cli-users",
@@ -2741,9 +2741,9 @@
             "text": ""
         },
         {
-            "location": "reference/cli_analysis/#find-pattern",
-            "title": "<code>find pattern</code>",
-            "text": "<p>Fuzzy search for code elements. Use this when you don't know the exact name.</p> <p>Usage: <pre><code>cgc find pattern &lt;text&gt;\n</code></pre></p>"
+            "location": "reference/cli_analysis/#find-name-substring",
+            "title": "<code>find name-substring</code>",
+            "text": "<p>Fuzzy search for code elements. Use this when you don't know the exact name.</p> <p>Usage: <pre><code>cgc find name-substring &lt;text&gt;\n</code></pre></p>"
         },
         {
             "location": "reference/cli_analysis/#find-name",
@@ -2833,7 +2833,7 @@
         {
             "location": "reference/cli_master/#discovery-search",
             "title": "Discovery &amp; Search",
-            "text": "Command Description Full Details <code>cgc find name</code> Find element by exact name. details <code>cgc find pattern</code> Fuzzy search (substring). details <code>cgc find type</code> List all Class/Function nodes. details <code>cgc find variable</code> Find variables by name. details <code>cgc find content</code> Full-text search in source code. details <code>cgc find decorator</code> Find functions with <code>@decorator</code>. details <code>cgc find argument</code> Find functions with specific arg. details"
+            "text": "Command Description Full Details <code>cgc find name</code> Find element by exact name. details <code>cgc find name-substring</code> Name-only substring search. details <code>cgc find type</code> List all Class/Function nodes. details <code>cgc find variable</code> Find variables by name. details <code>cgc find content</code> Full-text search in source code. details <code>cgc find decorator</code> Find functions with <code>@decorator</code>. details <code>cgc find argument</code> Find functions with specific arg. details"
         },
         {
             "location": "reference/cli_master/#system-configuration",
@@ -2923,7 +2923,7 @@
         {
             "location": "reference/mcp_master/#core-analysis-tools",
             "title": "Core Analysis Tools",
-            "text": "<p>These are the most commonly used tools for understanding code.</p> Tool Name Description Natural Language Example <code>find_code</code> Search for code by name or fuzzy text. \"Where is the <code>User</code> class defined?\" <code>analyze_code_relationships</code> The swiss-army knife for call graphs and dependencies. \"Find all callers of <code>process_payment</code>.\" <code>calculate_cyclomatic_complexity</code> Measure function complexity. \"What is the complexity of <code>main</code>?\" <code>find_most_complex_functions</code> List the hardest-to-maintain functions. \"Show me the 5 most complex functions.\" <code>find_dead_code</code> Identify unused functions. \"Find dead code, but ignore <code>@route</code>.\""
+            "text": "<p>These are the most commonly used tools for understanding code.</p> Tool Name Description Natural Language Example <code>find_name_substring</code> Search symbol names by substring. Use <code>grep_code</code> for source text. \"Where is the <code>User</code> class defined?\" <code>analyze_code_relationships</code> The swiss-army knife for call graphs and dependencies. \"Find all callers of <code>process_payment</code>.\" <code>calculate_cyclomatic_complexity</code> Measure function complexity. \"What is the complexity of <code>main</code>?\" <code>find_most_complex_functions</code> List the hardest-to-maintain functions. \"Show me the 5 most complex functions.\" <code>find_dead_code</code> Identify unused functions. \"Find dead code, but ignore <code>@route</code>.\""
         },
         {
             "location": "reference/mcp_master/#system-management",

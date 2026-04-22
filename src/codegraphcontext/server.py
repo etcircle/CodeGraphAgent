@@ -119,8 +119,8 @@ class MCPServer:
     def analyze_code_relationships_tool(self, **args) -> Dict[str, Any]:
         return analysis_handlers.analyze_code_relationships(self.code_finder, **args)
 
-    def find_code_tool(self, **args) -> Dict[str, Any]:
-        return analysis_handlers.find_code(self.code_finder, **args)
+    def find_name_substring_tool(self, **args) -> Dict[str, Any]:
+        return analysis_handlers.find_name_substring(self.code_finder, **args)
 
     def list_indexed_repositories_tool(self, **args) -> Dict[str, Any]:
         return management_handlers.list_indexed_repositories(self.code_finder, **args)
@@ -186,7 +186,7 @@ class MCPServer:
                 "primary_tools": {
                     "get_module_overview": "Understand a module — endpoints, services, models, schemas in one call. Start here when exploring a new module.",
                     "get_function_context": "Everything about a function — source (from filesystem), callers, callees, class, siblings. One call replaces 4-5 separate queries. If it returns found:false, the function might have a different name — try grep_code to find it first.",
-                    "grep_code": "Text/regex search across indexed repos. Use for string literals, error messages, API paths, config keys. Better than find_code.",
+                    "grep_code": "Text/regex search across indexed repos. Use for string literals, error messages, API paths, config keys. Better than find_name_substring for text.",
                     "find_references": "All usages of a symbol — callers, importers, type annotations, text mentions. Broader than analyze_code_relationships.",
                     "get_file_content": "Read source code with line numbers. Supports line ranges and around_line centering. Use this for reading ANY source file — it's faster and more reliable than external filesystem tools like Desktop Commander. Example: get_file_content(path='...', around_line=150, context_lines=50) to read 100 lines centered on line 150.",
                     "diff_since": "What changed recently — git commits + uncommitted changes. Use for handoffs between agents.",
@@ -194,12 +194,12 @@ class MCPServer:
                 },
                 "secondary_tools": {
                     "get_file_structure": "Project directory tree with function/class counts.",
+                    "find_name_substring": "Find symbol names by substring when you do not know the exact function, class, module, or variable name yet.",
                     "find_most_complex_functions": "Tech debt triage — find refactoring targets.",
                     "find_dead_code": "Find unused functions across the codebase.",
                     "execute_cypher_query": "Raw Cypher fallback — use only when primary tools can't answer your question.",
                 },
                 "avoid": {
-                    "find_code": "Use grep_code instead (regex, context lines, file filtering).",
                     "analyze_code_relationships": "Use find_references or get_function_context instead (more complete, fewer calls).",
                     "calculate_cyclomatic_complexity": "Already included in get_function_context and get_module_overview output.",
                     "Desktop Commander / external filesystem tools for reading source": "Use get_file_content instead — it reads files directly, supports line ranges and around_line centering, and is faster than crossing MCP boundaries.",
@@ -209,7 +209,8 @@ class MCPServer:
                     "understand_function": "get_function_context (one call, not four). If it returns found:false, use grep_code to find the exact function name, then retry.",
                     "read_large_source_block": "get_file_content with around_line + context_lines (e.g. around_line=500, context_lines=50 for 100 lines). Do NOT fall back to Desktop Commander.",
                     "find_usages": "find_references (not analyze_code_relationships)",
-                    "search_text": "grep_code (not find_code)",
+                    "find_symbol_by_partial_name": "find_name_substring → then get_function_context or find_references",
+                    "search_text": "grep_code (not find_name_substring)",
                     "read_source": "get_file_content (NEVER Desktop Commander or external filesystem tools)",
                     "trace_bug": "explain_path from entry point to suspected cause",
                     "pick_up_work": "diff_since to see what changed",
@@ -250,7 +251,7 @@ class MCPServer:
         tool_map: Dict[str, Coroutine] = {
             "add_package_to_graph": self.add_package_to_graph_tool,
             "find_dead_code": self.find_dead_code_tool,
-            "find_code": self.find_code_tool,
+            "find_name_substring": self.find_name_substring_tool,
             "analyze_code_relationships": self.analyze_code_relationships_tool,
             "watch_directory": self.watch_directory_tool,
             "execute_cypher_query": self.execute_cypher_query_tool,

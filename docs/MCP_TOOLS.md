@@ -50,8 +50,8 @@ List all background jobs.
 
 ## Code Search
 
-### `find_code`
-Find code snippets related to a keyword.
+### `find_name_substring`
+Find functions, classes, modules, and variables whose names contain a substring. This is name-only search.
 - **Args**: `query` (string), `fuzzy_search` (boolean), `edit_distance` (number)
 - **Returns**: Matches with file path, line number, and content
 

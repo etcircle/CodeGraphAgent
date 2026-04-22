@@ -63,7 +63,7 @@
 | Command | Arguments | Description |
 |---------|-----------|-------------|
 | `cgc find name` | `<name>` `--type` | Find code elements by exact name. |
-| `cgc find pattern` | `<pattern>` `--case-sensitive` | Find elements using fuzzy substring matching. |
+| `cgc find name-substring` | `<pattern>` `--case-sensitive` | Find symbol names using substring matching. |
 | `cgc find type` | `<type>` `--limit` | List all nodes of a specific type (function, class, module). |
 | `cgc find variable` | `<name>` `--file` | Find variables by name across the codebase. |
 | `cgc find content` | `<text>` `--case-sensitive` | Search for text content within code (docstrings, comments). |

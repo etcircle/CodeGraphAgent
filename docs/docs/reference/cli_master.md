@@ -32,7 +32,7 @@ This page lists **every single command** available in CodeGraphContext.
 | Command | Description | Full Details |
 | :--- | :--- | :--- |
 | **`cgc find name`** | Find element by exact name. | [details](cli_analysis.md#find-name) |
-| **`cgc find pattern`** | Fuzzy search (substring). | [details](cli_analysis.md#find-pattern) |
+| **`cgc find name-substring`** | Name-only substring search. | [details](cli_analysis.md#find-name-substring) |
 | **`cgc find type`** | List all Class/Function nodes. | [details](cli_analysis.md#find-type) |
 | **`cgc find variable`** | Find variables by name. | [details](cli_analysis.md#analyze-variable) |
 | **`cgc find content`** | Full-text search in source code. | [details](cli_analysis.md#find-content) |

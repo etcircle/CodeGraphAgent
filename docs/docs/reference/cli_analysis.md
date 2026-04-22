@@ -80,12 +80,12 @@ cgc analyze variable <var_name>
 
 ## Discovery & Search
 
-### `find pattern`
-Fuzzy search for code elements. Use this when you don't know the exact name.
+### `find name-substring`
+Substring search for symbol names. Use this when you don't know the exact function, class, module, or variable name.
 
 **Usage:**
 ```bash
-cgc find pattern <text>
+cgc find name-substring <text>
 ```
 
 ### `find name`

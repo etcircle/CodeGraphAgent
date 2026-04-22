@@ -32,15 +32,27 @@ class TestMCPServer:
         """Test that handle_tool_call routes to the correct internal method."""
         async def run_test():
             # Mock specific handler wrapper
-            mock_server.find_code_tool = MagicMock(return_value={"result": "found"})
+            mock_server.find_name_substring_tool = MagicMock(return_value={"result": "found"})
             
             # Act
-            result = await mock_server.handle_tool_call("find_code", {"query": "test"})
+            result = await mock_server.handle_tool_call("find_name_substring", {"query": "test"})
             
             # Assert
-            mock_server.find_code_tool.assert_called_once_with(query="test")
+            mock_server.find_name_substring_tool.assert_called_once_with(query="test")
             assert result == {"result": "found"}
             
+        asyncio.run(run_test())
+
+    def test_search_tool_manifest_uses_new_name(self, mock_server):
+        assert "find_name_substring" in mock_server.tools
+        assert "find_code" not in mock_server.tools
+
+    def test_old_search_tool_name_is_unknown(self, mock_server):
+        async def run_test():
+            result = await mock_server.handle_tool_call("find_code", {"query": "test"})
+            assert "error" in result
+            assert "Unknown tool" in result["error"]
+
         asyncio.run(run_test())
 
     def test_unknown_tool(self, mock_server):

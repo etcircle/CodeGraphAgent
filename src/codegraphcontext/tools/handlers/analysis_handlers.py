@@ -88,26 +88,23 @@ def analyze_code_relationships(code_finder: CodeFinder, **args) -> Dict[str, Any
         debug_log(f"Error analyzing relationships: {str(e)}")
         return {"error": f"Failed to analyze relationships: {str(e)}"}
 
-def find_code(code_finder: CodeFinder, **args) -> Dict[str, Any]:
-    """Tool to find relevant code snippets"""
+def find_name_substring(code_finder: CodeFinder, **args) -> Dict[str, Any]:
+    """Tool to find symbols whose names contain the given substring."""
     query = args.get("query")
-    DEFAULT_EDIT_DISTANCE = 2
-    DEFAULT_FUZZY_SEARCH = False
-    
-    fuzzy_search = args.get("fuzzy_search", DEFAULT_FUZZY_SEARCH)
-    edit_distance = args.get("edit_distance", DEFAULT_EDIT_DISTANCE)
     repo_path = args.get("repo_path")
+    case_sensitive = args.get("case_sensitive", False)
 
-    if fuzzy_search:
-        # Assuming minimal normalization is fine here if not method available
-        query = query.lower().replace("_", " ").strip()
-        
+    if not query:
+        return {"error": "query is required"}
+
     try:
-        debug_log(f"Finding code for query: {query} with fuzzy_search={fuzzy_search}, edit_distance={edit_distance}, repo_path={repo_path}")
-        results = code_finder.find_related_code(query, fuzzy_search, edit_distance, repo_path=repo_path)
+        debug_log(
+            f"Finding symbols by name substring for query: {query} with case_sensitive={case_sensitive}, repo_path={repo_path}"
+        )
+        results = code_finder.find_name_substring(query, repo_path=repo_path, case_sensitive=case_sensitive)
 
-        return {"success": True, "query": query, "results": results}
+        return {"success": True, "query": query, "total_matches": len(results), "results": results}
     
     except Exception as e:
-        debug_log(f"Error finding code: {str(e)}")
-        return {"error": f"Failed to find code: {str(e)}"}
+        debug_log(f"Error finding symbols by name substring: {str(e)}")
+        return {"error": f"Failed to find symbols by name substring: {str(e)}"}
