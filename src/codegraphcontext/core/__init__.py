@@ -4,17 +4,15 @@ Core database management module.
 
 Supports Neo4j, FalkorDB Lite, remote FalkorDB, and KùzuDB backends.
 Use DATABASE_TYPE environment variable to switch:
-- DATABASE_TYPE=kuzudb - Uses embedded KùzuDB (Recommended for cross-platform zero-config)
-- DATABASE_TYPE=falkordb - Uses embedded FalkorDB Lite (Unix-only)
-- DATABASE_TYPE=falkordb-remote - Uses a remote/hosted FalkorDB server over TCP
+- DATABASE_TYPE=falkordb - Uses embedded FalkorDB Lite (default local-first option on supported Unix setups)
+- DATABASE_TYPE=falkordb-remote - Uses a remote or self-hosted FalkorDB server over TCP
+- DATABASE_TYPE=kuzudb - Uses embedded KùzuDB (cross-platform local fallback)
 - DATABASE_TYPE=neo4j - Uses Neo4j server
-- If not set, auto-detects based on what's available
-
- Priority (no DATABASE_TYPE set):
-  1. FalkorDB Lite  (Unix + Python 3.12+ + falkordblite installed)
-  2. KùzuDB         (cross-platform fallback)
-  3. Remote FalkorDB (if FALKORDB_HOST is set)
-  4. Neo4j           (if credentials are configured)
+- If not set, the factory falls back in this order:
+  1. Remote FalkorDB (if FALKORDB_HOST is set)
+  2. FalkorDB Lite (if supported and installed)
+  3. KùzuDB
+  4. Neo4j (if configured)
 """
 import os
 import platform

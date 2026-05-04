@@ -171,6 +171,7 @@ class GraphBuilder:
                 session.run("CREATE CONSTRAINT annotation_unique IF NOT EXISTS FOR (a:Annotation) REQUIRE (a.name, a.path, a.line_number) IS UNIQUE")
                 session.run("CREATE CONSTRAINT record_unique IF NOT EXISTS FOR (r:Record) REQUIRE (r.name, r.path, r.line_number) IS UNIQUE")
                 session.run("CREATE CONSTRAINT property_unique IF NOT EXISTS FOR (p:Property) REQUIRE (p.name, p.path, p.line_number) IS UNIQUE")
+                session.run("CREATE CONSTRAINT parameter_unique IF NOT EXISTS FOR (p:Parameter) REQUIRE (p.name, p.path, p.function_line_number) IS UNIQUE")
                 
                 # Indexes for language attribute
                 session.run("CREATE INDEX function_lang IF NOT EXISTS FOR (f:Function) ON (f.lang)")
@@ -364,142 +365,163 @@ class GraphBuilder:
                 MERGE (p)-[:CONTAINS]->(f)
             """, parent_path=parent_path, path=file_path_str)
 
-            # CONTAINS relationships for functions, classes, and variables
-            # To add a new language-specific node type (e.g., 'Trait' for Rust):
-            # 1. Ensure your language-specific parser returns a list under a unique key (e.g., 'traits': [...] ).
-            # 2. Add a new constraint for the new label in the `create_schema` method.
-            # 3. Add a new entry to the `item_mappings` list below (e.g., (file_data.get('traits', []), 'Trait') ).
+            # CONTAINS relationships for functions, classes, variables, etc.
+            # Batch writes per label instead of issuing one query per node.
             item_mappings = [
                 (file_data.get('functions', []), 'Function'),
                 (file_data.get('classes', []), 'Class'),
-                (file_data.get('traits', []), 'Trait'), # <-- Added trait mapping
+                (file_data.get('traits', []), 'Trait'),
                 (file_data.get('variables', []), 'Variable'),
                 (file_data.get('interfaces', []), 'Interface'),
                 (file_data.get('macros', []), 'Macro'),
-                (file_data.get('structs',[]), 'Struct'),
-                (file_data.get('enums',[]), 'Enum'),
-                (file_data.get('unions',[]), 'Union'),
-                (file_data.get('records',[]), 'Record'),
-                (file_data.get('properties',[]), 'Property'),
+                (file_data.get('structs', []), 'Struct'),
+                (file_data.get('enums', []), 'Enum'),
+                (file_data.get('unions', []), 'Union'),
+                (file_data.get('records', []), 'Record'),
+                (file_data.get('properties', []), 'Property'),
             ]
             for item_data, label in item_mappings:
+                items_payload = []
                 for item in item_data:
-                    # Ensure cyclomatic_complexity is set for functions
-                    if label == 'Function' and 'cyclomatic_complexity' not in item:
-                        item['cyclomatic_complexity'] = 1 # Default value
+                    item_props = dict(item)
+                    if label == 'Function' and 'cyclomatic_complexity' not in item_props:
+                        item_props['cyclomatic_complexity'] = 1
+                    items_payload.append({
+                        'path': file_path_str,
+                        'name': item['name'],
+                        'line_number': item['line_number'],
+                        'props': item_props,
+                    })
 
-                    query = f"""
+                if items_payload:
+                    session.run(f"""
                         MATCH (f:File {{path: $path}})
-                        MERGE (n:{label} {{name: $name, path: $path, line_number: $line_number}})
-                        SET n += $props
+                        UNWIND $items as item
+                        MERGE (n:{label} {{name: item.name, path: item.path, line_number: item.line_number}})
+                        SET n += item.props
                         MERGE (f)-[:CONTAINS]->(n)
-                    """
+                    """, path=file_path_str, items=items_payload)
 
-                    session.run(query, path=file_path_str, name=item['name'], line_number=item['line_number'], props=item)
-                    
-                    if label == 'Function':
-                        for arg_name in item.get('args', []):
-                            session.run("""
-                                MATCH (fn:Function {name: $func_name, path: $path, line_number: $line_number})
-                                MERGE (p:Parameter {name: $arg_name, path: $path, function_line_number: $line_number})
-                                MERGE (fn)-[:HAS_PARAMETER]->(p)
-                            """, func_name=item['name'], path=file_path_str, line_number=item['line_number'], arg_name=arg_name)
-
-            # --- NEW: persist Ruby Modules ---
-            for m in file_data.get('modules', []):
+            function_parameters = [
+                {
+                    'func_name': func['name'],
+                    'line_number': func['line_number'],
+                    'arg_name': arg_name,
+                }
+                for func in file_data.get('functions', [])
+                for arg_name in func.get('args', [])
+            ]
+            if function_parameters:
                 session.run("""
-                    MERGE (mod:Module {name: $name})
+                    UNWIND $params as param
+                    MATCH (fn:Function {name: param.func_name, path: $path, line_number: param.line_number})
+                    MERGE (p:Parameter {name: param.arg_name, path: $path, function_line_number: param.line_number})
+                    MERGE (fn)-[:HAS_PARAMETER]->(p)
+                """, path=file_path_str, params=function_parameters)
+
+            modules_payload = [{'name': mod['name']} for mod in file_data.get('modules', []) if mod.get('name')]
+            if modules_payload:
+                session.run("""
+                    UNWIND $modules as module_item
+                    MERGE (mod:Module {name: module_item.name})
                     ON CREATE SET mod.lang = $lang
-                    ON MATCH  SET mod.lang = coalesce(mod.lang, $lang)
-                """, name=m["name"], lang=file_data.get("lang"))
+                    ON MATCH SET mod.lang = coalesce(mod.lang, $lang)
+                """, modules=modules_payload, lang=file_data.get('lang'))
 
-            # Create CONTAINS relationships for nested functions
-            for item in file_data.get('functions', []):
-                if item.get("context_type") == "function_definition":
-                    session.run("""
-                        MATCH (outer:Function {name: $context, path: $path})
-                        MATCH (inner:Function {name: $name, path: $path, line_number: $line_number})
-                        MERGE (outer)-[:CONTAINS]->(inner)
-                    """, context=item["context"], path=file_path_str, name=item["name"], line_number=item["line_number"])
+            nested_functions = [
+                {
+                    'context': item['context'],
+                    'name': item['name'],
+                    'line_number': item['line_number'],
+                }
+                for item in file_data.get('functions', [])
+                if item.get('context_type') == 'function_definition' and item.get('context')
+            ]
+            if nested_functions:
+                session.run("""
+                    UNWIND $nested_functions as rel
+                    MATCH (outer:Function {name: rel.context, path: $path})
+                    MATCH (inner:Function {name: rel.name, path: $path, line_number: rel.line_number})
+                    MERGE (outer)-[:CONTAINS]->(inner)
+                """, path=file_path_str, nested_functions=nested_functions)
 
-            # Handle imports and create IMPORTS relationships
-            for imp in file_data.get('imports', []):
-                info_logger(f"Processing import: {imp}")
-                lang = file_data.get('lang')
-                if lang == 'javascript':
-                    # New, correct logic for JS
+            lang = file_data.get('lang')
+            if lang == 'javascript':
+                javascript_imports = []
+                for imp in file_data.get('imports', []):
                     module_name = imp.get('source')
-                    if not module_name: continue
-
-                    # Use a map for relationship properties to handle optional alias and line_number
+                    if not module_name:
+                        continue
                     rel_props = {'imported_name': imp.get('name', '*')}
                     if imp.get('alias'):
                         rel_props['alias'] = imp.get('alias')
                     if imp.get('line_number'):
                         rel_props['line_number'] = imp.get('line_number')
+                    javascript_imports.append({'module_name': module_name, 'rel_props': rel_props})
 
+                if javascript_imports:
                     session.run("""
                         MATCH (f:File {path: $path})
-                        MERGE (m:Module {name: $module_name})
+                        UNWIND $imports as imp
+                        MERGE (m:Module {name: imp.module_name})
                         MERGE (f)-[r:IMPORTS]->(m)
-                        SET r += $props
-                    """, path=file_path_str, module_name=module_name, props=rel_props)
-                else:
-                    # Existing logic for Python (and other languages)
-                    # For KùzuDB, Module schema only has: name, lang, full_import_name.
-                    # 'alias' belongs on the relationship.
-                    
-                    set_clauses = []
-                    if 'full_import_name' in imp:
-                        set_clauses.append("m.full_import_name = $full_import_name")
-                    
-                    set_clause_str = ("SET " + ", ".join(set_clauses)) if set_clauses else ""
-
-                    # Build relationship properties
+                        SET r += imp.rel_props
+                    """, path=file_path_str, imports=javascript_imports)
+            else:
+                imports_payload = []
+                for imp in file_data.get('imports', []):
                     rel_props = {}
                     if imp.get('line_number'):
                         rel_props['line_number'] = imp.get('line_number')
                     if imp.get('alias'):
                         rel_props['alias'] = imp.get('alias')
-                    
-                    # Ensure full_import_name is available in params for SET clause
-                    params = imp.copy()
-                    params['path'] = file_path_str
-                    params['rel_props'] = rel_props
-                    params['module_name'] = imp.get('name') # Use 'name' from imp as module name
+                    imports_payload.append({
+                        'module_name': imp.get('name'),
+                        'full_import_name': imp.get('full_import_name'),
+                        'rel_props': rel_props,
+                    })
 
-                    session.run(f"""
-                        MATCH (f:File {{path: $path}})
-                        MERGE (m:Module {{name: $module_name}})
-                        {set_clause_str}
-                        MERGE (f)-[r:IMPORTS]->(m)
-                        SET r += $rel_props
-                    """, **params)
-
-
-            # Handle CONTAINS relationship between class to their children like variables
-            for func in file_data.get('functions', []):
-                if func.get('class_context'):
+                if imports_payload:
                     session.run("""
-                        MATCH (c:Class {name: $class_name, path: $path})
-                        MATCH (fn:Function {name: $func_name, path: $path, line_number: $func_line})
-                        MERGE (c)-[:CONTAINS]->(fn)
-                    """, 
-                    class_name=func['class_context'],
-                    path=file_path_str,
-                    func_name=func['name'],
-                    func_line=func['line_number'])
+                        MATCH (f:File {path: $path})
+                        UNWIND $imports as imp
+                        WITH f, imp
+                        WHERE imp.module_name IS NOT NULL
+                        MERGE (m:Module {name: imp.module_name})
+                        SET m.full_import_name = coalesce(imp.full_import_name, m.full_import_name)
+                        MERGE (f)-[r:IMPORTS]->(m)
+                        SET r += imp.rel_props
+                    """, path=file_path_str, imports=imports_payload)
 
-            # --- NEW: Class INCLUDES Module (Ruby mixins) ---
-            for inc in file_data.get('module_inclusions', []):
+            class_contains_payload = [
+                {
+                    'class_name': func['class_context'],
+                    'func_name': func['name'],
+                    'func_line': func['line_number'],
+                }
+                for func in file_data.get('functions', [])
+                if func.get('class_context')
+            ]
+            if class_contains_payload:
                 session.run("""
-                    MATCH (c:Class {name: $class_name, path: $path})
-                    MERGE (m:Module {name: $module_name})
+                    UNWIND $contains_rows as rel
+                    MATCH (c:Class {name: rel.class_name, path: $path})
+                    MATCH (fn:Function {name: rel.func_name, path: $path, line_number: rel.func_line})
+                    MERGE (c)-[:CONTAINS]->(fn)
+                """, path=file_path_str, contains_rows=class_contains_payload)
+
+            module_inclusions = [
+                {'class_name': inc['class'], 'module_name': inc['module']}
+                for inc in file_data.get('module_inclusions', [])
+                if inc.get('class') and inc.get('module')
+            ]
+            if module_inclusions:
+                session.run("""
+                    UNWIND $module_inclusions as rel
+                    MATCH (c:Class {name: rel.class_name, path: $path})
+                    MERGE (m:Module {name: rel.module_name})
                     MERGE (c)-[:INCLUDES]->(m)
-                """,
-                class_name=inc["class"],
-                path=file_path_str,
-                module_name=inc["module"])
+                """, path=file_path_str, module_inclusions=module_inclusions)
 
             # Class inheritance is handled in a separate pass after all files are processed.
             # Function calls are also handled in a separate pass after all files are processed.
@@ -1030,6 +1052,84 @@ class GraphBuilder:
             debug_log(f"[parse_file] Error parsing {path}: {e}")
             return {"path": str(path), "error": str(e)}
 
+    def collect_indexable_file_paths(self, path: Path) -> list[Path]:
+        """Return files CGC should represent in the graph for a repo or file path."""
+        path = Path(path).resolve()
+        all_files = [path] if path.is_file() else [f for f in path.rglob("*") if f.is_file()]
+
+        ignore_root = path if path.is_dir() else path.parent
+        cgcignore_path = None
+        curr = ignore_root
+        while True:
+            candidate = curr / ".cgcignore"
+            if candidate.exists():
+                cgcignore_path = candidate
+                ignore_root = curr
+                break
+            if curr.parent == curr:
+                break
+            curr = curr.parent
+
+        ignore_patterns = list(DEFAULT_IGNORE_PATTERNS)
+        if cgcignore_path:
+            user_patterns = [
+                line.strip()
+                for line in cgcignore_path.read_text().splitlines()
+                if line.strip() and not line.strip().startswith("#")
+            ]
+            ignore_patterns.extend(user_patterns)
+        spec = pathspec.PathSpec.from_lines("gitignore", ignore_patterns)
+
+        ignore_dirs_str = get_config_value("IGNORE_DIRS") or ""
+        ignore_dirs = {d.strip().lower() for d in ignore_dirs_str.split(",") if d.strip()}
+
+        files = []
+        base_for_dirs = path if path.is_dir() else path.parent
+        for f in all_files:
+            try:
+                rel_parent_parts = {part.lower() for part in f.relative_to(base_for_dirs).parent.parts}
+                if ignore_dirs and rel_parent_parts.intersection(ignore_dirs):
+                    continue
+            except ValueError:
+                pass
+
+            try:
+                rel_path = f.relative_to(ignore_root)
+            except ValueError:
+                rel_path = f
+            if spec.match_file(str(rel_path)):
+                continue
+            files.append(f)
+
+        return sorted(files)
+
+    def get_indexed_file_paths(self, repo_path: Path) -> set[str]:
+        """Return File node paths currently attached to a repository in the graph."""
+        repo_path_str = str(Path(repo_path).resolve())
+        with self.driver.session() as session:
+            result = session.run("""
+                MATCH (r:Repository {path: $repo_path})-[:CONTAINS*]->(f:File)
+                RETURN f.path AS path
+            """, repo_path=repo_path_str)
+            return {row["path"] for row in result if row.get("path")}
+
+    def verify_repository_index(self, repo_path: Path, sample_limit: int = 20) -> Dict:
+        """Compare indexable filesystem files against File nodes in the graph."""
+        expected = {str(path.resolve()) for path in self.collect_indexable_file_paths(repo_path)}
+        indexed = {str(Path(path).resolve()) for path in self.get_indexed_file_paths(repo_path)}
+        missing = sorted(expected - indexed)
+        extra = sorted(indexed - expected)
+        return {
+            "repo_path": str(Path(repo_path).resolve()),
+            "expected_count": len(expected),
+            "indexed_count": len(indexed),
+            "missing_count": len(missing),
+            "extra_count": len(extra),
+            "missing_paths": missing[:sample_limit],
+            "extra_paths": extra[:sample_limit],
+            "is_clean": not missing and not extra,
+        }
+
     def estimate_processing_time(self, path: Path) -> Optional[Tuple[int, float]]:
         """Estimate processing time and file count"""
         try:
@@ -1291,7 +1391,7 @@ class GraphBuilder:
                 with open(cgcignore_path) as f:
                     user_patterns = [line.strip() for line in f.read().splitlines() if line.strip() and not line.strip().startswith('#')]
                 ignore_patterns = DEFAULT_IGNORE_PATTERNS + user_patterns
-                spec = pathspec.PathSpec.from_lines('gitwildmatch', ignore_patterns)
+                spec = pathspec.PathSpec.from_lines('gitignore', ignore_patterns)
             else:
                 # No .cgcignore found — create one in the project root with default patterns
                 # so the user can see and customize what's being ignored
@@ -1306,7 +1406,7 @@ class GraphBuilder:
                     info_logger(f"Created default .cgcignore at {new_cgcignore}")
                 except OSError as e:
                     warning_logger(f"Could not create .cgcignore at {new_cgcignore}: {e}")
-                spec = pathspec.PathSpec.from_lines('gitwildmatch', DEFAULT_IGNORE_PATTERNS)
+                spec = pathspec.PathSpec.from_lines('gitignore', DEFAULT_IGNORE_PATTERNS)
 
             supported_extensions = self.parsers.keys()
             all_files = path.rglob("*") if path.is_dir() else [path]
