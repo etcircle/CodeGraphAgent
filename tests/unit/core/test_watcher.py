@@ -282,6 +282,99 @@ class TestRetryLogic:
         assert str(test_file) not in handler._failed_paths
         assert str(test_file) not in handler._failure_counts
 
+    def test_ignored_cached_path_is_purged_not_parsed(self, tmp_path):
+        handler = self._make_handler(tmp_path)
+        ignored_file = tmp_path / ".claude" / "worktrees" / "agent" / "app.py"
+        ignored_file.parent.mkdir(parents=True)
+        ignored_file.write_text("x = 1")
+        ignored_path = str(ignored_file)
+
+        handler.all_file_data[ignored_path] = {"path": ignored_path, "functions": [], "classes": [], "imports": []}
+        handler._file_mtimes[ignored_path] = ignored_file.stat().st_mtime
+        handler._file_state[ignored_path] = {"mtime": ignored_file.stat().st_mtime, "size": ignored_file.stat().st_size}
+        handler._pending_paths.add(ignored_path)
+
+        handler._process_batch()
+
+        assert ignored_path not in handler.all_file_data
+        assert ignored_path not in handler._file_mtimes
+        assert ignored_path not in handler._file_state
+        handler.graph_builder.delete_file_from_graph.assert_called_once_with(ignored_path)
+        handler.graph_builder.parse_file.assert_not_called()
+        handler.graph_builder.update_file_in_graph.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# File-state cache baseline
+# ---------------------------------------------------------------------------
+
+class TestFileStateBaseline:
+    """Tests for no-initial-scan watcher baseline loaded from file_state.json."""
+
+    def _make_handler(self, tmp_path, cache_dir):
+        from codegraphcontext.core.watcher import RepositoryEventHandler
+
+        mock_gb = MagicMock()
+        mock_gb.parsers = {".py": MagicMock()}
+        mock_gb._pre_scan_for_imports.return_value = {}
+        mock_gb._create_all_function_calls.return_value = None
+        mock_gb._create_all_inheritance_links.return_value = None
+        mock_gb.parse_file.return_value = {"path": "x", "functions": [], "classes": [], "imports": []}
+        mock_gb.update_file_in_graph.return_value = None
+        mock_gb.delete_file_from_graph.return_value = None
+
+        with patch.dict(os.environ, {
+            'CGC_HEALTH_DIR': str(tmp_path / "health"),
+            'CGC_FILE_CACHE_DIR': str(cache_dir),
+        }):
+            handler = RepositoryEventHandler(mock_gb, tmp_path, perform_initial_scan=False)
+            if handler._health_timer:
+                handler._health_timer.cancel()
+            if handler._reconcile_timer:
+                handler._reconcile_timer.cancel()
+        return handler
+
+    def test_no_initial_scan_loads_file_state_baseline(self, tmp_path):
+        from codegraphcontext.core.watcher import RepositoryEventHandler
+
+        source = tmp_path / "app.py"
+        source.write_text("x = 1")
+        ignored = tmp_path / ".claude" / "worktrees" / "agent" / "copy.py"
+        ignored.parent.mkdir(parents=True)
+        ignored.write_text("x = 1")
+
+        cache_dir = tmp_path / "cache"
+        temp_handler = RepositoryEventHandler.__new__(RepositoryEventHandler)
+        temp_handler.repo_path = tmp_path
+        with patch.dict(os.environ, {'CGC_FILE_CACHE_DIR': str(cache_dir)}):
+            repo_cache_dir = temp_handler._get_cache_dir()
+        repo_cache_dir.mkdir(parents=True, exist_ok=True)
+        (repo_cache_dir / "file_state.json").write_text(json.dumps({
+            str(source): {"mtime": source.stat().st_mtime, "size": source.stat().st_size},
+            str(ignored): {"mtime": ignored.stat().st_mtime, "size": ignored.stat().st_size},
+        }))
+
+        handler = self._make_handler(tmp_path, cache_dir)
+
+        assert str(source) in handler._file_state
+        assert str(source) in handler._file_mtimes
+        assert str(ignored) not in handler._file_state
+        assert str(ignored) not in handler._file_mtimes
+
+    def test_save_file_state_preserves_loaded_baseline_when_no_files_parsed(self, tmp_path):
+        source = tmp_path / "app.py"
+        source.write_text("x = 1")
+        cache_dir = tmp_path / "cache"
+        handler = self._make_handler(tmp_path, cache_dir)
+        handler._file_state[str(source)] = {"mtime": source.stat().st_mtime, "size": source.stat().st_size}
+        handler._file_mtimes[str(source)] = source.stat().st_mtime
+
+        with patch.dict(os.environ, {'CGC_FILE_CACHE_DIR': str(cache_dir)}):
+            handler._save_file_state()
+            saved = json.loads((handler._get_cache_dir() / "file_state.json").read_text())
+
+        assert list(saved.keys()) == [str(source)]
+
 
 # ---------------------------------------------------------------------------
 # Adaptive debounce
@@ -374,11 +467,13 @@ class TestFileStability:
 class TestShouldIgnore:
     """Tests for gitignore + IGNORE_DIRS filtering."""
 
-    def _make_handler(self, tmp_path, gitignore_content=None):
+    def _make_handler(self, tmp_path, gitignore_content=None, cgcignore_content=None):
         from codegraphcontext.core.watcher import RepositoryEventHandler
 
         if gitignore_content:
             (tmp_path / ".gitignore").write_text(gitignore_content)
+        if cgcignore_content:
+            (tmp_path / ".cgcignore").write_text(cgcignore_content)
 
         mock_gb = MagicMock()
         mock_gb.parsers = {".py": MagicMock()}
@@ -411,6 +506,16 @@ class TestShouldIgnore:
     def test_ignores_gitignore_patterns(self, tmp_path):
         handler = self._make_handler(tmp_path, gitignore_content="*.log\nbuild/")
         assert handler._should_ignore(str(tmp_path / "app.log")) is True
+
+    def test_ignores_cgcignore_patterns(self, tmp_path):
+        handler = self._make_handler(tmp_path, cgcignore_content=".agent-worktrees/\n*.generated.py")
+        assert handler._should_ignore(str(tmp_path / ".agent-worktrees" / "copy.py")) is True
+        assert handler._should_ignore(str(tmp_path / "client.generated.py")) is True
+
+    def test_ignores_agent_and_tool_caches_by_default(self, tmp_path):
+        handler = self._make_handler(tmp_path)
+        assert handler._should_ignore(str(tmp_path / ".claude" / "worktrees" / "agent" / "app.py")) is True
+        assert handler._should_ignore(str(tmp_path / "backend" / ".ruff_cache" / "x.py")) is True
 
     def test_does_not_ignore_normal_files(self, tmp_path):
         handler = self._make_handler(tmp_path)

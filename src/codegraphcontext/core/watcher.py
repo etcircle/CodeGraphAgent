@@ -24,11 +24,11 @@ if typing.TYPE_CHECKING:
 
 from codegraphcontext.utils.debug_log import debug_log, info_logger, error_logger, warning_logger
 
-# Directories always ignored regardless of .gitignore
+# Directories always ignored regardless of repo ignore files.
 IGNORE_DIRS = {
     '__pycache__', '.git', '.hg', '.svn', 'node_modules', '.tox', '.mypy_cache',
-    '.pytest_cache', '.eggs', '*.egg-info', 'dist', 'build', '.venv', 'venv',
-    'env', '.env', '.idea', '.vscode',
+    '.pytest_cache', '.ruff_cache', '.eggs', '*.egg-info', 'dist', 'build',
+    '.venv', 'venv', 'env', '.env', '.idea', '.vscode', '.claude', '.hermes',
 }
 
 class Neo4jCircuitBreaker:
@@ -119,15 +119,30 @@ class RepositoryEventHandler(FileSystemEventHandler):
         self._error_count: int = 0
         self._needs_full_relink: bool = False
 
-        # File mtimes for reconciliation (Phase 3)
+        # File mtimes/state for reconciliation (Phase 3)
         self._file_mtimes: dict = {}
+        self._file_state: dict = {}
 
-        # Load .gitignore patterns for this repo
-        self._gitignore_spec = self._load_gitignore()
+        # Load repo ignore patterns. CGC has its own .cgcignore, but keeping
+        # .gitignore support prevents already-ignored build artefacts from
+        # flooding the watcher.
+        self._ignore_spec = self._load_ignore_spec()
 
         # Perform the initial scan and linking when the watcher is created.
         if perform_initial_scan:
             self._initial_scan()
+        else:
+            # The CLI skips initial scan when the repo is already indexed. Still
+            # seed reconciliation from the persisted file-state cache; otherwise
+            # the first reconciliation treats every source file as new and burns
+            # CPU rebuilding the world.
+            self._file_state = self._load_file_state()
+            self._file_mtimes = {
+                path_str: state.get("mtime", 0)
+                for path_str, state in self._file_state.items()
+            }
+            if self._file_state:
+                info_logger(f"Loaded watcher baseline for {len(self._file_state)} files")
 
         # Start health heartbeat (writes health even when idle)
         self._health_timer = None
@@ -137,19 +152,20 @@ class RepositoryEventHandler(FileSystemEventHandler):
         self._reconcile_timer = None
         self._start_reconciliation_timer()
 
-    def _load_gitignore(self) -> pathspec.PathSpec:
-        """Load .gitignore patterns from the repo root, combined with IGNORE_DIRS."""
+    def _load_ignore_spec(self) -> pathspec.PathSpec:
+        """Load built-in, .cgcignore and .gitignore patterns for this repo."""
         patterns = list(IGNORE_DIRS)
-        gitignore_path = self.repo_path / '.gitignore'
-        if gitignore_path.is_file():
-            try:
-                patterns.extend(gitignore_path.read_text().splitlines())
-            except OSError:
-                pass
+        for ignore_name in ('.cgcignore', '.gitignore'):
+            ignore_path = self.repo_path / ignore_name
+            if ignore_path.is_file():
+                try:
+                    patterns.extend(ignore_path.read_text().splitlines())
+                except OSError:
+                    pass
         return pathspec.PathSpec.from_lines("gitignore", patterns)
 
     def _should_ignore(self, path_str: str) -> bool:
-        """Return True if the path should be ignored (compiled files, .gitignore, IGNORE_DIRS)."""
+        """Return True if the path should be ignored by CGC watcher rules."""
         if path_str.endswith('.pyc') or path_str.endswith('.pyo'):
             return True
         # Check against IGNORE_DIRS by examining path parts
@@ -160,7 +176,7 @@ class RepositoryEventHandler(FileSystemEventHandler):
         # Check against .gitignore spec using relative path
         try:
             rel = str(Path(path_str).relative_to(self.repo_path))
-            if self._gitignore_spec.match_file(rel):
+            if self._ignore_spec.match_file(rel):
                 return True
         except ValueError:
             pass
@@ -189,6 +205,7 @@ class RepositoryEventHandler(FileSystemEventHandler):
     def _initial_scan(self):
         """Scans the repository, using file state cache for incremental startup."""
         cached_state = self._load_file_state()
+        self._file_state = cached_state
 
         if cached_state:
             info_logger(f"Found cached state for {len(cached_state)} files — doing incremental startup")
@@ -366,14 +383,35 @@ class RepositoryEventHandler(FileSystemEventHandler):
                 self._failure_counts.pop(p, None)
 
         all_paths = paths | retry_paths
-        info_logger(f"Processing batch of {len(all_paths)} file(s) ({len(retry_paths)} retries)")
+        ignored_paths = {p for p in all_paths if self._should_ignore(p)}
+        for p in ignored_paths:
+            self.all_file_data.pop(p, None)
+            self._file_mtimes.pop(p, None)
+            self._file_state.pop(p, None)
+            self._failed_paths.discard(p)
+            self._failure_counts.pop(p, None)
+        active_paths = all_paths - ignored_paths
+        info_logger(
+            f"Processing batch of {len(all_paths)} file(s) ({len(retry_paths)} retries, "
+            f"{len(ignored_paths)} ignored)"
+        )
 
         supported_extensions = self.graph_builder.parsers.keys()
         batch_errors = 0
         successfully_processed = set()
 
+        # Delete ignored paths from the graph/cache without parsing or re-adding
+        # them. This lets reconciliation purge paths that became ignored after
+        # they were already cached, e.g. .claude/worktrees.
+        for path_str in ignored_paths:
+            try:
+                self.graph_builder.delete_file_from_graph(path_str)
+            except Exception as e:
+                error_logger(f"Failed to delete ignored path {path_str}: {e}")
+                batch_errors += 1
+
         # 1. Per-file parse + cache update — each file isolated
-        for path_str in all_paths:
+        for path_str in active_paths:
             try:
                 modified_path = Path(path_str)
                 if (modified_path.exists() and modified_path.is_file()
@@ -393,6 +431,8 @@ class RepositoryEventHandler(FileSystemEventHandler):
                         self.all_file_data.pop(str(modified_path), None)
                 else:
                     self.all_file_data.pop(path_str, None)
+                    self._file_mtimes.pop(path_str, None)
+                    self._file_state.pop(path_str, None)
                 successfully_processed.add(path_str)
             except Exception as e:
                 error_logger(f"Failed to process {path_str}: {e}")
@@ -436,9 +476,12 @@ class RepositoryEventHandler(FileSystemEventHandler):
         # 5. Update file mtimes for reconciliation
         for p in successfully_processed:
             try:
-                self._file_mtimes[p] = Path(p).stat().st_mtime
+                stat = Path(p).stat()
+                self._file_mtimes[p] = stat.st_mtime
+                self._file_state[p] = {"mtime": stat.st_mtime, "size": stat.st_size}
             except OSError:
                 self._file_mtimes.pop(p, None)
+                self._file_state.pop(p, None)
 
         # 6. Update health + metrics
         self._last_batch_time = datetime.now(tz=timezone.utc).isoformat()
@@ -515,17 +558,25 @@ class RepositoryEventHandler(FileSystemEventHandler):
         """Catch events missed by watchdog."""
         try:
             current_files = {str(f) for f in self._get_supported_files()}
-            cached_files = set(self.all_file_data.keys())
+            known_files = (
+                set(self.all_file_data.keys())
+                | set(self._file_state.keys())
+                | set(self._file_mtimes.keys())
+            )
 
-            new_files = current_files - cached_files
-            deleted_files = cached_files - current_files
+            new_files = current_files - known_files
+            deleted_files = known_files - current_files
 
             # Check mtime for modified files
             modified_files = set()
-            for f in current_files & cached_files:
+            for f in current_files & known_files:
                 try:
                     mtime = Path(f).stat().st_mtime
-                    if mtime > self._file_mtimes.get(f, 0):
+                    baseline = self._file_mtimes.get(
+                        f,
+                        self._file_state.get(f, {}).get("mtime", 0),
+                    )
+                    if mtime > baseline:
                         modified_files.add(f)
                 except OSError:
                     continue
@@ -555,7 +606,10 @@ class RepositoryEventHandler(FileSystemEventHandler):
     def _save_file_state(self):
         """Persist file mtimes + sizes for fast restart diff."""
         state = {}
-        for path_str in self.all_file_data:
+        candidate_paths = set(self._file_state.keys()) | set(self.all_file_data.keys())
+        for path_str in candidate_paths:
+            if self._should_ignore(path_str):
+                continue
             try:
                 p = Path(path_str)
                 stat = p.stat()
@@ -563,6 +617,8 @@ class RepositoryEventHandler(FileSystemEventHandler):
             except OSError:
                 continue
 
+        self._file_state = state
+        self._file_mtimes = {path_str: meta["mtime"] for path_str, meta in state.items()}
         cache_path = self._get_cache_dir() / "file_state.json"
         cache_path.write_text(json.dumps(state))
         info_logger(f"Saved file state cache: {len(state)} files")
@@ -572,7 +628,16 @@ class RepositoryEventHandler(FileSystemEventHandler):
         cache_path = self._get_cache_dir() / "file_state.json"
         if cache_path.exists():
             try:
-                return json.loads(cache_path.read_text())
+                cached_state = json.loads(cache_path.read_text())
+                filtered_state = {
+                    path_str: state
+                    for path_str, state in cached_state.items()
+                    if not self._should_ignore(path_str)
+                }
+                pruned = len(cached_state) - len(filtered_state)
+                if pruned:
+                    info_logger(f"Pruned {pruned} ignored path(s) from file state cache")
+                return filtered_state
             except Exception:
                 return {}
         return {}
